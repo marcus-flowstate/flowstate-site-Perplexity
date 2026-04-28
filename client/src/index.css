@@ -1,0 +1,216 @@
+@import url('https://api.fontshare.com/v2/css?f[]=satoshi@400,500,600,700,800,900&f[]=general-sans@400,500,600,700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* FlowState Brand Palette
+   ------------------------
+   St Tropaz Deep Blue   #2B5095
+   East Bay              #3C5E84
+   Boston Blue           #3A88B6
+   Pelorous              #3F9DC1
+   Viking Teal           #61C1D4
+   Polar                 #ECF8FA
+   Black Squeeze         #ECF5F8
+   Gondola Near-Black    #0C0808
+   Wordmark gradient: #294D9C -> #4BE1E2
+*/
+
+:root {
+  --button-outline: rgba(255, 255, 255, 0.1);
+  --badge-outline: rgba(255, 255, 255, 0.05);
+  --opaque-button-border-intensity: -8;
+  --elevate-1: rgba(255, 255, 255, 0.04);
+  --elevate-2: rgba(255, 255, 255, 0.08);
+
+  /* Dark navy background — feels like the FlowState brand */
+  --background: 220 38% 8%;
+  --foreground: 200 40% 96%;
+  --border: 217 30% 18%;
+  --card: 217 35% 11%;
+  --card-foreground: 200 40% 96%;
+  --card-border: 217 30% 18%;
+  --sidebar: 217 35% 10%;
+  --sidebar-foreground: 200 40% 96%;
+  --sidebar-border: 217 30% 18%;
+  --sidebar-primary: 198 60% 50%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 217 30% 18%;
+  --sidebar-accent-foreground: 200 40% 96%;
+  --sidebar-ring: 198 60% 50%;
+  --popover: 217 35% 13%;
+  --popover-foreground: 200 40% 96%;
+  --popover-border: 217 30% 22%;
+
+  /* Brand teal — Pelorous-ish, the action color */
+  --primary: 192 53% 50%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 217 30% 18%;
+  --secondary-foreground: 200 40% 96%;
+  --muted: 217 25% 16%;
+  --muted-foreground: 205 20% 70%;
+  --accent: 192 53% 50%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 70% 50%;
+  --destructive-foreground: 0 0% 98%;
+  --input: 217 30% 22%;
+  --ring: 192 53% 50%;
+
+  /* FlowState brand colors as direct values for custom use */
+  --fs-deep-blue: 217 56% 38%;       /* St Tropaz #2B5095 */
+  --fs-east-bay: 215 38% 38%;         /* East Bay #3C5E84 */
+  --fs-boston-blue: 201 51% 47%;      /* Boston Blue #3A88B6 */
+  --fs-pelorous: 195 51% 50%;         /* Pelorous #3F9DC1 */
+  --fs-viking: 188 60% 60%;           /* Viking #61C1D4 */
+  --fs-bright-cyan: 181 78% 59%;      /* Bright accent #4BE1E2 */
+  --fs-polar: 192 60% 96%;            /* Polar #ECF8FA */
+
+  --chart-1: 192 53% 50%;
+  --chart-2: 217 56% 48%;
+  --chart-3: 188 60% 60%;
+  --chart-4: 181 78% 59%;
+  --chart-5: 215 38% 48%;
+
+  --font-sans: 'Satoshi', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-display: 'General Sans', 'Satoshi', -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', Menlo, monospace;
+  --radius: 0.625rem;
+
+  --shadow-2xs: 0px 1px 2px 0px hsl(217 56% 5% / 0.3);
+  --shadow-xs: 0px 1px 3px 0px hsl(217 56% 5% / 0.4);
+  --shadow-sm: 0px 4px 8px 0px hsl(217 56% 5% / 0.3), 0px 1px 2px -1px hsl(217 56% 5% / 0.4);
+  --shadow: 0px 8px 16px 0px hsl(217 56% 5% / 0.4), 0px 2px 4px -1px hsl(217 56% 5% / 0.3);
+  --shadow-md: 0px 12px 24px 0px hsl(217 56% 5% / 0.5), 0px 4px 8px -2px hsl(217 56% 5% / 0.4);
+  --shadow-lg: 0px 24px 48px 0px hsl(217 56% 5% / 0.5), 0px 8px 16px -4px hsl(217 56% 5% / 0.4);
+  --shadow-xl: 0px 32px 64px 0px hsl(217 56% 5% / 0.6), 0px 12px 24px -6px hsl(217 56% 5% / 0.5);
+  --shadow-2xl: 0px 48px 96px 0px hsl(217 56% 5% / 0.7);
+  --tracking-normal: 0em;
+  --spacing: 0.25rem;
+
+  /* Border helpers */
+  --sidebar-primary-border: hsl(var(--sidebar-primary));
+  --primary-border: hsl(var(--primary));
+  --secondary-border: hsl(var(--secondary));
+  --muted-border: hsl(var(--muted));
+  --accent-border: hsl(var(--accent));
+  --destructive-border: hsl(var(--destructive));
+  --sidebar-accent-border: hsl(var(--sidebar-accent));
+}
+
+/* No light mode for v1 — site is dark-only by design */
+.dark {
+  --background: 220 38% 8%;
+  --foreground: 200 40% 96%;
+  --border: 217 30% 18%;
+  --card: 217 35% 11%;
+  --card-foreground: 200 40% 96%;
+  --card-border: 217 30% 18%;
+  --primary: 192 53% 50%;
+  --primary-foreground: 0 0% 100%;
+  --muted: 217 25% 16%;
+  --muted-foreground: 205 20% 70%;
+  --input: 217 30% 22%;
+  --ring: 192 53% 50%;
+}
+
+@layer base {
+  * { @apply border-border; }
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+    font-feature-settings: 'ss01', 'cv11';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+  }
+}
+
+@layer utilities {
+  /* FlowState brand gradient — used for the wordmark and accents */
+  .fs-gradient-text {
+    background: linear-gradient(135deg, #294D9C 0%, #3A88B6 50%, #4BE1E2 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
+  .fs-gradient-bg {
+    background: linear-gradient(135deg, #294D9C 0%, #3A88B6 50%, #4BE1E2 100%);
+  }
+  .fs-radial-glow {
+    background:
+      radial-gradient(ellipse 80% 50% at 50% 0%, rgba(75, 225, 226, 0.15), transparent 60%),
+      radial-gradient(ellipse 60% 60% at 80% 30%, rgba(58, 136, 182, 0.18), transparent 60%),
+      radial-gradient(ellipse 60% 50% at 20% 60%, rgba(41, 77, 156, 0.20), transparent 60%);
+  }
+  .fs-grid-bg {
+    background-image:
+      linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+    background-size: 48px 48px;
+  }
+
+  input[type='search']::-webkit-search-cancel-button { @apply hidden; }
+
+  [contenteditable][data-placeholder]:empty::before {
+    content: attr(data-placeholder);
+    color: hsl(var(--muted-foreground));
+    pointer-events: none;
+  }
+
+  .no-default-hover-elevate {}
+  .no-default-active-elevate {}
+
+  .toggle-elevate::before, .toggle-elevate-2::before {
+    content: ''; pointer-events: none; position: absolute; inset: 0px;
+    border-radius: inherit; z-index: -1;
+  }
+  .toggle-elevate.toggle-elevated::before { background-color: var(--elevate-2); }
+  .border.toggle-elevate::before { inset: -1px; }
+
+  .hover-elevate:not(.no-default-hover-elevate),
+  .active-elevate:not(.no-default-active-elevate),
+  .hover-elevate-2:not(.no-default-hover-elevate),
+  .active-elevate-2:not(.no-default-active-elevate) {
+    position: relative; z-index: 0;
+  }
+  .hover-elevate:not(.no-default-hover-elevate)::after,
+  .active-elevate:not(.no-default-active-elevate)::after,
+  .hover-elevate-2:not(.no-default-hover-elevate)::after,
+  .active-elevate-2:not(.no-default-active-elevate)::after {
+    content: ''; pointer-events: none; position: absolute; inset: 0px;
+    border-radius: inherit; z-index: 999;
+  }
+  .hover-elevate:hover:not(.no-default-hover-elevate)::after,
+  .active-elevate:active:not(.no-default-active-elevate)::after { background-color: var(--elevate-1); }
+  .hover-elevate-2:hover:not(.no-default-hover-elevate)::after,
+  .active-elevate-2:active:not(.no-default-active-elevate)::after { background-color: var(--elevate-2); }
+
+  .border.hover-elevate:not(.no-hover-interaction-elevate)::after,
+  .border.active-elevate:not(.no-active-interaction-elevate)::after,
+  .border.hover-elevate-2:not(.no-hover-interaction-elevate)::after,
+  .border.active-elevate-2:not(.no-active-interaction-elevate)::after { inset: -1px; }
+
+  /* Soft pulse for the live-data dot */
+  @keyframes fs-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(1.3); }
+  }
+  .fs-pulse { animation: fs-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+
+  /* Fade-up reveal — used on intersection */
+  @keyframes fs-fade-up {
+    0% { opacity: 0; transform: translateY(20px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+  .fs-fade-up { animation: fs-fade-up 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+
+  /* Subtle floating motion for hero dashboard */
+  @keyframes fs-float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-8px); }
+  }
+  .fs-float { animation: fs-float 6s ease-in-out infinite; }
+}
