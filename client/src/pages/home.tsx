@@ -103,22 +103,34 @@ function BrowserFrame({
 }
 
 /* ----------------- Animated production line visual ------------------ */
-/* Discrete-event simulation. 7 stations (L01–L07) with uniform invisible
-   slot grid: ~3 input + 4 between every station pair + ~3 output.
+/* Discrete-event simulation. 7 stations (STA 01–STA 07) with uniform invisible
+   slot grid: 3 input + 4 between every station pair + 3 output (37 slots total).
    Dots advance one slot per tick if the next slot is empty AND has been
-   empty for at least RELEASE_DELAY ticks (the 0.1s pallet release delay,
-   so dots cascade instead of moving as a solid block).
-   Stations gate their dot by cycle time (healthy / slow / down).
+   empty for at least RELEASE_DELAY ticks (cascade behavior). Stations also
+   gate by cycle time (healthy / slow / down) and now by MIN_DWELL so a part
+   never "flies by" a station.
 
    Event timeline (loops):
-     t=0    -> STA 05 SLOW CYCLE  (yellow)        for ~10s
-     t=10s  -> STA 07 DOWN        (red)           for ~8s
-     t=18s  -> healthy gap                        for ~4s
-     t=22s  -> repeat
-   The CONSTRAINT label always renders red, sitting above the active station. */
+     1. sta05_slow_only        — STA 05 slow + CONSTRAINT on STA 05      (~10s)
+     2. sta07_down_pre_block   — STA 07 also DOWN, CONSTRAINT still on   (until
+                                  slots 24..32 are fully clogged, ~3-6s)
+     3. sta07_down_post_block  — CONSTRAINT moves to STA 07              (~10s)
+     4. sta07_recover_green    — STA 07 green flash, CONSTRAINT stays    (1.0s)
+     5. sta07_recover_linger   — STA 07 healthy, CONSTRAINT lingers      (3.0s)
+     6. gap                    — everything healthy, no CONSTRAINT       (~3s)
+     -> loop
+   Visual state of stations is decoupled from where the CONSTRAINT label is.
+   A losses bar chart above the line accumulates while the label sits on a
+   station and hard-resets at the start of phase 1. */
 
-type StationKind = "healthy" | "slow" | "down";
-type Phase = "sta05_slow" | "sta07_down" | "gap";
+type StationKind = "healthy" | "slow" | "down" | "recover";
+type Phase =
+  | "sta05_slow_only"
+  | "sta07_down_pre_block"
+  | "sta07_down_post_block"
+  | "sta07_recover_green"
+  | "sta07_recover_linger"
+  | "gap";
 
 // Slot kinds describe each position on the line.
 type SlotKind =
@@ -131,21 +143,24 @@ type SlotKind =
 // 3-slot input runway at the start, 3-slot output runway at the end.
 function buildSlots(): SlotKind[] {
   const out: SlotKind[] = [];
-  // Beginning invisible stops
   for (let i = 0; i < 3; i++) out.push({ type: "input" });
-  // 7 stations with 4 buffers between each pair
   for (let s = 1; s <= 7; s++) {
     out.push({ type: "station", id: s, label: s.toString().padStart(2, "0") });
     if (s < 7) {
       for (let b = 0; b < 4; b++) out.push({ type: "buffer" });
     }
   }
-  // End invisible stops
   for (let i = 0; i < 3; i++) out.push({ type: "output" });
   return out;
 }
 
 const SLOTS: SlotKind[] = buildSlots();
+
+// Slot indices that, when ALL occupied, indicate STA 05 is fully blocked
+// downstream (everything between STA 05's exit and STA 07's entrance is full).
+// Layout: STA05=23, buffers 24-27, STA06=28, buffers 29-32, STA07=33.
+const BLOCK_RANGE_START = 24;
+const BLOCK_RANGE_END = 32; // inclusive
 
 // Tick = 100ms. Cycle times are in ticks.
 const TICK_MS = 100;
@@ -153,10 +168,18 @@ const HEALTHY_CYCLE = 12;     // 1.2s — stations release this often when healt
 const SLOW_CYCLE = 35;        // 3.5s — slow cycle
 const INPUT_PERIOD = 12;      // spawn a new dot at slot 0 every 12 ticks
 const RELEASE_DELAY = 1;      // 0.1s — a slot can't be re-occupied the same tick it was vacated
+const MIN_DWELL = 5;          // 0.5s — minimum time a part dwells at a station before release
+
+// Phase durations (in ticks). The pre-block phase is open-ended: it ends
+// either when the block is detected OR after PRE_BLOCK_MAX as a safety cap.
+// Total STA 07 down time targets ~16s (2× the previous 8s).
 const PHASE_TICKS = {
-  sta05_slow: 100,            // 10s
-  sta07_down: 80,             // 8s
-  gap: 40,                    // 4s
+  sta05_slow_only: 100,        // 10s — STA 05 slow + constraint, before STA 07 fails
+  sta07_down_pre_block_max: 60, // 6s safety cap; usually ends earlier on block
+  sta07_down_post_block: 100,  // 10s — block detected, constraint shifts to STA 07
+  sta07_recover_green: 10,     // 1.0s green flash
+  sta07_recover_linger: 30,    // 3.0s constraint lingers on STA 07
+  gap: 30,                     // 3s healthy gap, also when the bar chart resets
 };
 
 function FlowVisual({ className = "" }: { className?: string }) {
@@ -164,27 +187,63 @@ function FlowVisual({ className = "" }: { className?: string }) {
   const [running, setRunning] = useState(false);
   const [reduced, setReduced] = useState(false);
 
-  // Tick counter and simulation state — kept in refs to avoid re-render storms.
+  // ---- Simulation state (refs, not React state) ----
   const tickRef = useRef(0);
-  const phaseRef = useRef<Phase>("sta05_slow");
+  const phaseRef = useRef<Phase>("sta05_slow_only");
   const phaseStartRef = useRef(0);
+  // Where the CONSTRAINT label sits — decoupled from station visual state.
+  const constraintAtRef = useRef<5 | 7 | null>(5);
   // Slots store dot IDs (number) or null if empty.
   const slotsRef = useRef<(number | null)[]>(Array(SLOTS.length).fill(null));
   // Per-station last-release tick — gates cycle time.
   const lastReleaseRef = useRef<Record<number, number>>({});
   // Per-slot tick when the slot was last vacated. Enforces the 0.1s pallet
   // release delay so dots cascade instead of all moving on the same tick.
-  // Initialized to -RELEASE_DELAY so empty slots are immediately available.
   const lastVacatedRef = useRef<number[]>(
     Array(SLOTS.length).fill(-RELEASE_DELAY)
   );
+  // Per-slot tick when the current dot ARRIVED. For station slots, gates
+  // MIN_DWELL so a part never flies past a station.
+  const dotArrivedRef = useRef<number[]>(Array(SLOTS.length).fill(0));
   const lastSpawnRef = useRef(-INPUT_PERIOD);
   const nextIdRef = useRef(1);
+  // Losses accumulator — ticks the constraint label sat on each station this cycle.
+  const lossesRef = useRef<{ s5: number; s7: number }>({ s5: 0, s7: 0 });
 
-  // Render-state mirrors of the simulation state. We update these every tick
-  // so React can paint the new positions.
-  const [slots, setSlots] = useState<(number | null)[]>(() => Array(SLOTS.length).fill(null));
-  const [phase, setPhase] = useState<Phase>("sta05_slow");
+  // ---- Render-state mirrors ----
+  const [slots, setSlots] = useState<(number | null)[]>(() =>
+    Array(SLOTS.length).fill(null)
+  );
+  const [phase, setPhase] = useState<Phase>("sta05_slow_only");
+  const [constraintAt, setConstraintAt] = useState<5 | 7 | null>(5);
+  const [losses, setLosses] = useState<{ s5: number; s7: number }>({
+    s5: 0,
+    s7: 0,
+  });
+
+  // ---- One-time pre-fill: each station starts with a dot ----
+  // useRef trick so we only run init once even with strict-mode double-mount.
+  const initRef = useRef(false);
+  if (!initRef.current) {
+    initRef.current = true;
+    const sl = slotsRef.current;
+    const arrived = dotArrivedRef.current;
+    let id = 1;
+    for (let i = 0; i < SLOTS.length; i++) {
+      if (SLOTS[i].type === "station") {
+        sl[i] = id++;
+        arrived[i] = 0;
+      }
+    }
+    nextIdRef.current = id;
+    // Allow stations to release as soon as cycle + MIN_DWELL elapses
+    // (their first release is ~0.5s in).
+    for (let s = 1; s <= 7; s++) {
+      lastReleaseRef.current[s] = -HEALTHY_CYCLE;
+    }
+    // Sync render state
+    setSlots(sl.slice());
+  }
 
   // Detect reduced motion preference once.
   useEffect(() => {
@@ -196,7 +255,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
     return () => mq.removeEventListener?.("change", onChange);
   }, []);
 
-  // Pause when offscreen — saves battery and avoids drift.
+  // Pause when offscreen.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -210,44 +269,108 @@ function FlowVisual({ className = "" }: { className?: string }) {
     return () => obs.disconnect();
   }, []);
 
-  // Simulation tick loop.
+  // ---- Simulation tick loop ----
   useEffect(() => {
     if (!running || reduced) return;
     let intervalId: number | null = null;
 
     const step = () => {
       const t = tickRef.current;
-
-      // 1. Phase transitions
       const phaseElapsed = t - phaseStartRef.current;
       const currentPhase = phaseRef.current;
+
+      // 1. Phase transitions
+      let nextPhase: Phase | null = null;
       if (
-        (currentPhase === "sta05_slow" && phaseElapsed >= PHASE_TICKS.sta05_slow) ||
-        (currentPhase === "sta07_down" && phaseElapsed >= PHASE_TICKS.sta07_down) ||
-        (currentPhase === "gap" && phaseElapsed >= PHASE_TICKS.gap)
+        currentPhase === "sta05_slow_only" &&
+        phaseElapsed >= PHASE_TICKS.sta05_slow_only
       ) {
-        const next: Phase =
-          currentPhase === "sta05_slow"
-            ? "sta07_down"
-            : currentPhase === "sta07_down"
-            ? "gap"
-            : "sta05_slow";
-        phaseRef.current = next;
-        phaseStartRef.current = t;
-        setPhase(next);
+        nextPhase = "sta07_down_pre_block";
+      } else if (currentPhase === "sta07_down_pre_block") {
+        // End on detected block OR safety cap.
+        let blocked = true;
+        const sl0 = slotsRef.current;
+        for (let i = BLOCK_RANGE_START; i <= BLOCK_RANGE_END; i++) {
+          if (sl0[i] === null) {
+            blocked = false;
+            break;
+          }
+        }
+        if (blocked || phaseElapsed >= PHASE_TICKS.sta07_down_pre_block_max) {
+          nextPhase = "sta07_down_post_block";
+        }
+      } else if (
+        currentPhase === "sta07_down_post_block" &&
+        phaseElapsed >= PHASE_TICKS.sta07_down_post_block
+      ) {
+        nextPhase = "sta07_recover_green";
+      } else if (
+        currentPhase === "sta07_recover_green" &&
+        phaseElapsed >= PHASE_TICKS.sta07_recover_green
+      ) {
+        nextPhase = "sta07_recover_linger";
+      } else if (
+        currentPhase === "sta07_recover_linger" &&
+        phaseElapsed >= PHASE_TICKS.sta07_recover_linger
+      ) {
+        nextPhase = "gap";
+      } else if (currentPhase === "gap" && phaseElapsed >= PHASE_TICKS.gap) {
+        nextPhase = "sta05_slow_only";
       }
 
-      // 2. Move dots — iterate from output side back to input so we don't double-move.
-      //    A dot at slot i can move to i+1 only if i+1 is empty AND has been
-      //    empty for at least RELEASE_DELAY ticks (cascade behavior).
+      if (nextPhase) {
+        phaseRef.current = nextPhase;
+        phaseStartRef.current = t;
+        setPhase(nextPhase);
+
+        // Update constraint label location based on the new phase.
+        let nextConstraint: 5 | 7 | null = constraintAtRef.current;
+        if (nextPhase === "sta05_slow_only") {
+          nextConstraint = 5;
+          // Hard reset losses bar at the start of a new cycle.
+          lossesRef.current = { s5: 0, s7: 0 };
+          setLosses({ s5: 0, s7: 0 });
+        } else if (nextPhase === "sta07_down_pre_block") {
+          nextConstraint = 5; // stays on STA 05 until block detected
+        } else if (nextPhase === "sta07_down_post_block") {
+          nextConstraint = 7; // shifts on block
+        } else if (
+          nextPhase === "sta07_recover_green" ||
+          nextPhase === "sta07_recover_linger"
+        ) {
+          nextConstraint = 7; // stays on STA 07 through recovery + linger
+        } else if (nextPhase === "gap") {
+          nextConstraint = null;
+        }
+        if (nextConstraint !== constraintAtRef.current) {
+          constraintAtRef.current = nextConstraint;
+          setConstraintAt(nextConstraint);
+        }
+      }
+
+      // 2. Accumulate losses every tick the constraint sits on a station.
+      if (constraintAtRef.current === 5) {
+        lossesRef.current = {
+          s5: lossesRef.current.s5 + 1,
+          s7: lossesRef.current.s7,
+        };
+      } else if (constraintAtRef.current === 7) {
+        lossesRef.current = {
+          s5: lossesRef.current.s5,
+          s7: lossesRef.current.s7 + 1,
+        };
+      }
+
+      // 3. Move dots — back-to-front so we don't double-move.
       const sl = slotsRef.current.slice();
       const vac = lastVacatedRef.current;
+      const arr = dotArrivedRef.current;
       for (let i = sl.length - 1; i >= 0; i--) {
         const dot = sl[i];
         if (dot === null) continue;
         const slotKind = SLOTS[i];
 
-        // Output — dots disappear once they reach the final slot and tick once.
+        // Output: dots disappear at the final slot.
         if (slotKind.type === "output" && i === sl.length - 1) {
           sl[i] = null;
           vac[i] = t;
@@ -257,18 +380,18 @@ function FlowVisual({ className = "" }: { className?: string }) {
         const nextIdx = i + 1;
         if (nextIdx >= sl.length) continue;
         if (sl[nextIdx] !== null) continue; // blocked
-        // Pallet release delay: even if next slot is empty, wait until at
-        // least RELEASE_DELAY ticks after it was vacated. This is what makes
-        // a queue cascade forward instead of jumping in lockstep.
         if (t - vac[nextIdx] < RELEASE_DELAY) continue;
 
-        // If this slot is a station, it gates by cycle time.
+        // Station gates: cycle time + MIN_DWELL + healthy/slow/down state.
         if (slotKind.type === "station") {
           const stationKind = stationStateAt(slotKind.id, phaseRef.current);
-          if (stationKind === "down") continue; // never release
-          const cycle = stationKind === "slow" ? SLOW_CYCLE : HEALTHY_CYCLE;
+          if (stationKind === "down") continue; // never release while down
+          const cycle =
+            stationKind === "slow" ? SLOW_CYCLE : HEALTHY_CYCLE;
           const last = lastReleaseRef.current[slotKind.id] ?? -cycle;
           if (t - last < cycle) continue;
+          // Minimum in-station dwell — no fly-bys.
+          if (t - arr[i] < MIN_DWELL) continue;
           lastReleaseRef.current[slotKind.id] = t;
         }
 
@@ -276,22 +399,25 @@ function FlowVisual({ className = "" }: { className?: string }) {
         sl[nextIdx] = dot;
         sl[i] = null;
         vac[i] = t;
+        arr[nextIdx] = t;
       }
 
-      // 3. Spawn new dots at slot 0 if it's empty (and respects release delay)
-      //    and enough ticks have passed since the last spawn.
+      // 4. Spawn new dots at slot 0 if available.
       if (
         sl[0] === null &&
         t - vac[0] >= RELEASE_DELAY &&
         t - lastSpawnRef.current >= INPUT_PERIOD
       ) {
         sl[0] = nextIdRef.current++;
+        arr[0] = t;
         lastSpawnRef.current = t;
       }
 
       slotsRef.current = sl;
       lastVacatedRef.current = vac;
+      dotArrivedRef.current = arr;
       setSlots(sl);
+      setLosses({ ...lossesRef.current });
       tickRef.current = t + 1;
     };
 
@@ -301,21 +427,36 @@ function FlowVisual({ className = "" }: { className?: string }) {
     };
   }, [running, reduced]);
 
-  // Layout geometry — viewBox sized to fit 34 slots cleanly.
+  // ---- Layout geometry ----
   const SLOT_PITCH = 24;
   const X0 = 30;
-  const Y_LINE = 170;
-  const VB_W = X0 * 2 + SLOTS.length * SLOT_PITCH; // 30 + 34*24 + 30 = 876
-  const VB_H = 320;
-  const SLOT_CELL_H = 18; // height of the slot-cell box around the conveyor
+  const Y_LINE = 230; // shifted down to make room for the bar chart above
+  const VB_W = X0 * 2 + SLOTS.length * SLOT_PITCH; // 30 + 37*24 + 30 = 948
+  const VB_H = 380;
+  const SLOT_CELL_H = 18;
   const slotX = (i: number) => X0 + i * SLOT_PITCH + SLOT_PITCH / 2;
+
+  // Bar chart layout — sits at top of SVG, above the line.
+  const CHART_X = X0;
+  const CHART_Y = 20;
+  const CHART_W = SLOTS.length * SLOT_PITCH;
+  const CHART_H = 90;
+  // Max scale: pick a sensible ceiling (e.g., 15s worth of ticks at 1 tick each)
+  // so bars don't overflow visually. Anything beyond clamps.
+  const LOSS_MAX = 150; // 15s
+  const lossScale = (v: number) =>
+    (Math.min(v, LOSS_MAX) / LOSS_MAX) * (CHART_H - 18);
+
+  // Recover-green color
+  const GREEN_STROKE = "#22C55E";
+  const GREEN_FILL = "rgba(34, 197, 94, 0.22)";
 
   return (
     <div
       ref={containerRef}
       className={`relative w-full ${className}`}
       data-testid="img-flow-visual"
-      aria-label="Animated production line simulation showing dots flowing through stations with a constraint event"
+      aria-label="Animated production line simulation showing dots flowing through stations with a shifting constraint event and a losses bar chart"
     >
       <svg
         viewBox={`0 0 ${VB_W} ${VB_H}`}
@@ -344,13 +485,133 @@ function FlowVisual({ className = "" }: { className?: string }) {
           </filter>
         </defs>
 
-        {/* Soft background glow */}
-        <ellipse cx={VB_W / 2} cy={Y_LINE} rx={VB_W * 0.45} ry="80" fill="url(#flowGlow)" />
-
-        {/* Slot grid — a row of subtle outlined cells along the conveyor.
-            Makes the discrete "invisible stops" between stations visible. */}
+        {/* ============ Losses bar chart (above the line) ============ */}
         <g>
-          {/* Outer continuous frame around the whole slot row */}
+          {/* Chart title */}
+          <text
+            x={CHART_X}
+            y={CHART_Y - 4}
+            fill="rgba(255,255,255,0.55)"
+            fontSize="10"
+            fontFamily="ui-monospace, monospace"
+            letterSpacing="1.4"
+            fontWeight="600"
+          >
+            LOSSES (this cycle)
+          </text>
+          {/* Chart frame */}
+          <rect
+            x={CHART_X}
+            y={CHART_Y}
+            width={CHART_W}
+            height={CHART_H}
+            fill="rgba(255,255,255,0.02)"
+            stroke="rgba(255,255,255,0.10)"
+            strokeWidth="1"
+            rx="3"
+          />
+          {/* Baseline */}
+          <line
+            x1={CHART_X + 60}
+            y1={CHART_Y + CHART_H - 14}
+            x2={CHART_X + CHART_W - 12}
+            y2={CHART_Y + CHART_H - 14}
+            stroke="rgba(255,255,255,0.18)"
+            strokeWidth="1"
+          />
+          {/* Two bars side-by-side */}
+          {(() => {
+            const baseline = CHART_Y + CHART_H - 14;
+            const barW = 28;
+            const groupX = CHART_X + 90;
+            const gap = 24;
+            const s5H = lossScale(losses.s5);
+            const s7H = lossScale(losses.s7);
+            return (
+              <>
+                {/* STA 05 bar */}
+                <rect
+                  x={groupX}
+                  y={baseline - s5H}
+                  width={barW}
+                  height={s5H}
+                  fill="rgba(245, 197, 24, 0.30)"
+                  stroke="#F5C518"
+                  strokeWidth="1.5"
+                  style={{ transition: `y ${TICK_MS}ms linear, height ${TICK_MS}ms linear` }}
+                />
+                <text
+                  x={groupX + barW / 2}
+                  y={baseline + 10}
+                  fill="rgba(255,255,255,0.55)"
+                  fontSize="9"
+                  fontFamily="ui-monospace, monospace"
+                  textAnchor="middle"
+                  letterSpacing="1"
+                  fontWeight="600"
+                >
+                  STA 05
+                </text>
+                {/* STA 07 bar */}
+                <rect
+                  x={groupX + barW + gap}
+                  y={baseline - s7H}
+                  width={barW}
+                  height={s7H}
+                  fill="rgba(229, 75, 75, 0.30)"
+                  stroke="#E54B4B"
+                  strokeWidth="1.5"
+                  style={{ transition: `y ${TICK_MS}ms linear, height ${TICK_MS}ms linear` }}
+                />
+                <text
+                  x={groupX + barW + gap + barW / 2}
+                  y={baseline + 10}
+                  fill="rgba(255,255,255,0.55)"
+                  fontSize="9"
+                  fontFamily="ui-monospace, monospace"
+                  textAnchor="middle"
+                  letterSpacing="1"
+                  fontWeight="600"
+                >
+                  STA 07
+                </text>
+                {/* Y-axis hint label */}
+                <text
+                  x={CHART_X + 8}
+                  y={CHART_Y + 14}
+                  fill="rgba(255,255,255,0.40)"
+                  fontSize="8"
+                  fontFamily="ui-monospace, monospace"
+                  letterSpacing="0.8"
+                >
+                  TIME ON
+                </text>
+                <text
+                  x={CHART_X + 8}
+                  y={CHART_Y + 24}
+                  fill="rgba(255,255,255,0.40)"
+                  fontSize="8"
+                  fontFamily="ui-monospace, monospace"
+                  letterSpacing="0.8"
+                >
+                  CONSTRAINT
+                </text>
+              </>
+            );
+          })()}
+        </g>
+
+        {/* Soft background glow behind line */}
+        <ellipse
+          cx={VB_W / 2}
+          cy={Y_LINE}
+          rx={VB_W * 0.45}
+          ry="80"
+          fill="url(#flowGlow)"
+        />
+
+        {/* Slot grid */}
+        <g>
           <rect
             x={X0}
             y={Y_LINE - SLOT_CELL_H / 2}
@@ -360,21 +621,22 @@ function FlowVisual({ className = "" }: { className?: string }) {
             stroke="rgba(255,255,255,0.18)"
             strokeWidth="1"
           />
-          {/* Vertical separators between every slot */}
-          {Array.from({ length: SLOTS.length - 1 }, (_, i) => i + 1).map((i) => (
-            <line
-              key={`grid-${i}`}
-              x1={X0 + i * SLOT_PITCH}
-              y1={Y_LINE - SLOT_CELL_H / 2}
-              x2={X0 + i * SLOT_PITCH}
-              y2={Y_LINE + SLOT_CELL_H / 2}
-              stroke="rgba(255,255,255,0.10)"
-              strokeWidth="1"
-            />
-          ))}
+          {Array.from({ length: SLOTS.length - 1 }, (_, i) => i + 1).map(
+            (i) => (
+              <line
+                key={`grid-${i}`}
+                x1={X0 + i * SLOT_PITCH}
+                y1={Y_LINE - SLOT_CELL_H / 2}
+                x2={X0 + i * SLOT_PITCH}
+                y2={Y_LINE + SLOT_CELL_H / 2}
+                stroke="rgba(255,255,255,0.10)"
+                strokeWidth="1"
+              />
+            )
+          )}
         </g>
 
-        {/* Conveyor path glow underneath the grid */}
+        {/* Conveyor path glow */}
         <line
           x1={X0}
           y1={Y_LINE}
@@ -385,16 +647,15 @@ function FlowVisual({ className = "" }: { className?: string }) {
           filter="url(#flowSoftBlur)"
         />
 
-        {/* Stations — the station's slot in the grid is highlighted, and a
-            machine "box" hangs below the conveyor. Label below the box. */}
+        {/* Stations */}
         {SLOTS.map((slot, i) => {
           if (slot.type !== "station") return null;
           const cx = slotX(i);
           const kind = stationStateAt(slot.id, phase);
+          const isConstrained = constraintAt === slot.id;
           const boxW = 38;
           const boxH = 50;
           const boxX = cx - boxW / 2;
-          // Box hangs below the conveyor with a small gap.
           const boxY = Y_LINE + SLOT_CELL_H / 2 + 8;
 
           // Base healthy treatment
@@ -423,11 +684,18 @@ function FlowVisual({ className = "" }: { className?: string }) {
             textInside = "DOWN";
             textColor = "#E54B4B";
             strokeWidth = 2;
+          } else if (kind === "recover") {
+            stroke = GREEN_STROKE;
+            fill = GREEN_FILL;
+            cellStroke = GREEN_STROKE;
+            cellFill = GREEN_FILL;
+            textInside = "RECOVER";
+            textColor = GREEN_STROKE;
+            strokeWidth = 2;
           }
 
           return (
             <g key={`sta-${slot.id}`}>
-              {/* When constrained, recolor the conveyor slot-cell itself */}
               {cellStroke && cellFill && (
                 <rect
                   x={cx - SLOT_PITCH / 2}
@@ -439,23 +707,22 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   strokeWidth="1.5"
                 />
               )}
-              {/* CONSTRAINT label — only on the active constrained station,
-                  positioned above the conveyor cell */}
-              {kind !== "healthy" && (
+              {/* CONSTRAINT label — driven solely by constraintAt, not station kind */}
+              {isConstrained && (
                 <text
                   x={cx}
                   y={Y_LINE - SLOT_CELL_H / 2 - 8}
                   fill="#E54B4B"
-                  fontSize="8"
+                  fontSize="9"
                   fontFamily="ui-monospace, monospace"
                   textAnchor="middle"
-                  letterSpacing="1.4"
+                  letterSpacing="1.6"
                   fontWeight="700"
                 >
                   CONSTRAINT
                 </text>
               )}
-              {/* Machine box below conveyor */}
+              {/* Machine box */}
               <rect
                 x={boxX}
                 y={boxY}
@@ -466,16 +733,16 @@ function FlowVisual({ className = "" }: { className?: string }) {
                 stroke={stroke}
                 strokeWidth={strokeWidth}
               />
-              {/* Inside text — single label per box (DOWN or SLOW CYCLE) */}
+              {/* Inside text — bigger now (10/9.5 vs old 8/7.5) */}
               {textInside && !twoLine && (
                 <text
                   x={cx}
-                  y={boxY + boxH / 2 + 3}
+                  y={boxY + boxH / 2 + 4}
                   fill={textColor}
-                  fontSize="8"
+                  fontSize="10"
                   fontFamily="ui-monospace, monospace"
                   textAnchor="middle"
-                  letterSpacing="1"
+                  letterSpacing="1.2"
                   fontWeight="700"
                 >
                   {textInside}
@@ -487,52 +754,49 @@ function FlowVisual({ className = "" }: { className?: string }) {
                     x={cx}
                     y={boxY + boxH / 2 - 2}
                     fill={textColor}
-                    fontSize="7.5"
+                    fontSize="9.5"
                     fontFamily="ui-monospace, monospace"
                     textAnchor="middle"
-                    letterSpacing="0.5"
+                    letterSpacing="0.6"
                     fontWeight="700"
                   >
                     SLOW
                   </text>
                   <text
                     x={cx}
-                    y={boxY + boxH / 2 + 8}
+                    y={boxY + boxH / 2 + 10}
                     fill={textColor}
-                    fontSize="7.5"
+                    fontSize="9.5"
                     fontFamily="ui-monospace, monospace"
                     textAnchor="middle"
-                    letterSpacing="0.5"
+                    letterSpacing="0.6"
                     fontWeight="700"
                   >
                     CYCLE
                   </text>
                 </>
               )}
-              {/* Station label below box: just "L05" — matches reference image */}
+              {/* Station label below box: "STA 01" — bigger */}
               <text
                 x={cx}
-                y={boxY + boxH + 14}
-                fill="rgba(255,255,255,0.55)"
-                fontSize="9"
+                y={boxY + boxH + 16}
+                fill="rgba(255,255,255,0.65)"
+                fontSize="11"
                 fontFamily="ui-monospace, monospace"
                 textAnchor="middle"
-                letterSpacing="1.5"
-                fontWeight="500"
+                letterSpacing="1.6"
+                fontWeight="600"
               >
-                L{slot.label}
+                STA {slot.label}
               </text>
             </g>
           );
         })}
 
-        {/* Dots — one per occupied slot. */}
+        {/* Dots */}
         {slots.map((dot, i) => {
           if (dot === null) return null;
           const slotKind = SLOTS[i];
-          // Don't render dots inside station boxes that are DOWN — visually they sit
-          // inside the box but the colored fill makes them hard to see; show a slightly
-          // dimmed version.
           let opacity = 0.95;
           if (slotKind.type === "station") {
             const k = stationStateAt(slotKind.id, phase);
@@ -543,7 +807,9 @@ function FlowVisual({ className = "" }: { className?: string }) {
             <g
               key={`dot-${dot}`}
               transform={`translate(${slotX(i)} ${Y_LINE})`}
-              style={{ transition: `transform ${TICK_MS}ms linear, opacity 200ms ease` }}
+              style={{
+                transition: `transform ${TICK_MS}ms linear, opacity 200ms ease`,
+              }}
               opacity={opacity}
             >
               <circle cx="0" cy="0" r="3.5" fill="url(#flowBuild)" />
@@ -556,9 +822,20 @@ function FlowVisual({ className = "" }: { className?: string }) {
 }
 
 // Returns the visual state of a station given the current phase.
+// NOTE: visual state is decoupled from CONSTRAINT label location.
 function stationStateAt(stationId: number, phase: Phase): StationKind {
-  if (phase === "sta05_slow" && stationId === 5) return "slow";
-  if (phase === "sta07_down" && stationId === 7) return "down";
+  // STA 05 stays SLOW for every phase except gap.
+  if (stationId === 5 && phase !== "gap") return "slow";
+  // STA 07 progresses through DOWN -> RECOVER -> healthy.
+  if (stationId === 7) {
+    if (
+      phase === "sta07_down_pre_block" ||
+      phase === "sta07_down_post_block"
+    ) {
+      return "down";
+    }
+    if (phase === "sta07_recover_green") return "recover";
+  }
   return "healthy";
 }
 
