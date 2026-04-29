@@ -436,8 +436,9 @@ function FlowVisual({ className = "" }: { className?: string }) {
   // All text in this section is roughly doubled vs. round 5 for floor-display readability.
   const CHART_TITLE_Y = 38;        // big "LOSSES THIS CYCLE" title
   const CHART_Y = 70;              // top of chart frame (more room above for bigger title)
-  const CHART_H = 170;             // taller chart so bars are readable + room for axis caption
-  const Y_LINE = CHART_Y + CHART_H + 90;  // leaves room for chart + station hint
+  const CHART_H = 210;             // taller chart so bars to ~32 builds fit; gained height by
+                                   // pulling production line down (was 170 + 90 below).
+  const Y_LINE = CHART_Y + CHART_H + 60;  // line sits closer to chart now; chart is ~40px taller.
   const SLOT_CELL_H = 26;          // taller slot grid
   const VB_W = X0 * 2 + SLOTS.length * SLOT_PITCH; // 30 + 37*24 + 30 = 948
   const VB_H = Y_LINE + 240;       // leaves room for taller boxes, larger labels, big title below
@@ -447,8 +448,9 @@ function FlowVisual({ className = "" }: { className?: string }) {
   // their corresponding stations.
   const CHART_X = X0;
   const CHART_W = SLOTS.length * SLOT_PITCH;
-  // Max scale clamps bars; ~24s worth of ticks at the longest plausible run.
-  const LOSS_MAX = 240;
+  // Max scale clamps bars at 32 builds (320 ticks). Realistic worst case ≈ 29, so this gives
+  // visible headroom and keeps 28 vs. 24 visually distinguishable.
+  const LOSS_MAX = 320;
   const lossScale = (v: number) =>
     (Math.min(v, LOSS_MAX) / LOSS_MAX) * (CHART_H - 30);
 
