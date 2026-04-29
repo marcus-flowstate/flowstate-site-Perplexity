@@ -102,6 +102,196 @@ function BrowserFrame({
   );
 }
 
+/* ----------------- Animated production line visual ------------------ */
+/* Calm, hypnotic SVG. 8 stations connected by a flow path. Build units
+   stream left-to-right; one station occasionally pulses amber to suggest
+   a bottleneck moment, and FlowState resolves the flow back to teal.    */
+
+function FlowVisual({ className = "" }: { className?: string }) {
+  // Stations along the line. Coordinates are within a 600x360 viewBox.
+  const stations = [
+    { x: 60, y: 180 },
+    { x: 130, y: 180 },
+    { x: 200, y: 180 },
+    { x: 270, y: 180 },
+    { x: 340, y: 180 }, // bottleneck index 4
+    { x: 410, y: 180 },
+    { x: 480, y: 180 },
+    { x: 550, y: 180 },
+  ];
+  const bottleneckIndex = 4;
+
+  // 7 build units; staggered animation delays to create a continuous stream.
+  const builds = Array.from({ length: 7 }, (_, i) => i);
+
+  return (
+    <div
+      className={`relative w-full ${className}`}
+      data-testid="img-flow-visual"
+      aria-label="Animated production line showing build units flowing through stations"
+    >
+      <svg
+        viewBox="0 0 600 360"
+        className="w-full h-auto block"
+        xmlns="http://www.w3.org/2000/svg"
+        role="img"
+      >
+        <defs>
+          {/* Brand gradient for the conveyor path */}
+          <linearGradient id="flowConveyor" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stopColor="#294D9C" stopOpacity="0.0" />
+            <stop offset="15%" stopColor="#294D9C" stopOpacity="0.55" />
+            <stop offset="50%" stopColor="#3A88B6" stopOpacity="0.7" />
+            <stop offset="85%" stopColor="#4BE1E2" stopOpacity="0.55" />
+            <stop offset="100%" stopColor="#4BE1E2" stopOpacity="0.0" />
+          </linearGradient>
+          <linearGradient id="flowBuild" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor="#4BE1E2" />
+            <stop offset="100%" stopColor="#3A88B6" />
+          </linearGradient>
+          <radialGradient id="flowGlow" cx="0.5" cy="0.5" r="0.5">
+            <stop offset="0%" stopColor="#4BE1E2" stopOpacity="0.35" />
+            <stop offset="100%" stopColor="#4BE1E2" stopOpacity="0" />
+          </radialGradient>
+          <filter id="flowSoftBlur">
+            <feGaussianBlur stdDeviation="2" />
+          </filter>
+        </defs>
+
+        {/* Soft background glow */}
+        <ellipse cx="300" cy="180" rx="280" ry="90" fill="url(#flowGlow)" />
+
+        {/* Subtle grid lines for the floor plane */}
+        <g stroke="rgba(255,255,255,0.04)" strokeWidth="1">
+          <line x1="0" y1="260" x2="600" y2="260" />
+          <line x1="0" y1="290" x2="600" y2="290" />
+          <line x1="0" y1="320" x2="600" y2="320" />
+        </g>
+
+        {/* Conveyor path — the flow line */}
+        <line
+          x1="30"
+          y1="180"
+          x2="580"
+          y2="180"
+          stroke="url(#flowConveyor)"
+          strokeWidth="2"
+        />
+        <line
+          x1="30"
+          y1="180"
+          x2="580"
+          y2="180"
+          stroke="rgba(75, 225, 226, 0.15)"
+          strokeWidth="6"
+          filter="url(#flowSoftBlur)"
+        />
+
+        {/* Stations */}
+        {stations.map((s, i) => {
+          const isBottleneck = i === bottleneckIndex;
+          return (
+            <g key={i}>
+              {/* Station base — small rectangle below the line */}
+              <rect
+                x={s.x - 14}
+                y={s.y + 10}
+                width="28"
+                height="38"
+                rx="4"
+                fill="rgba(255,255,255,0.03)"
+                stroke="rgba(255,255,255,0.10)"
+                strokeWidth="1"
+              />
+              <text
+                x={s.x}
+                y={s.y + 64}
+                fill="rgba(255,255,255,0.30)"
+                fontSize="8"
+                fontFamily="ui-monospace, monospace"
+                textAnchor="middle"
+                letterSpacing="1"
+              >
+                {`L${(i + 1).toString().padStart(2, "0")}`}
+              </text>
+              {/* Station node — pulses if bottleneck */}
+              <circle
+                cx={s.x}
+                cy={s.y}
+                r={isBottleneck ? 6 : 4}
+                fill={isBottleneck ? "#3A88B6" : "#4BE1E2"}
+                opacity={isBottleneck ? 1 : 0.85}
+                className={isBottleneck ? "flow-station-bottleneck" : "flow-station"}
+                style={{ animationDelay: `${i * 0.35}s` }}
+              />
+              {/* Outer ring on bottleneck */}
+              {isBottleneck && (
+                <circle
+                  cx={s.x}
+                  cy={s.y}
+                  r="6"
+                  fill="none"
+                  stroke="#3A88B6"
+                  strokeWidth="1.5"
+                  className="flow-bottleneck-ring"
+                />
+              )}
+            </g>
+          );
+        })}
+
+        {/* Build units flowing along the line */}
+        {builds.map((i) => (
+          <circle
+            key={i}
+            cx="30"
+            cy="180"
+            r="2.5"
+            fill="url(#flowBuild)"
+            className="flow-build"
+            style={{ animationDelay: `${i * 1.4}s` }}
+          />
+        ))}
+
+        {/* Subtle quiet labels above the line */}
+        <text
+          x="30"
+          y="110"
+          fill="rgba(255,255,255,0.30)"
+          fontSize="9"
+          fontFamily="ui-monospace, monospace"
+          letterSpacing="2"
+        >
+          INPUT
+        </text>
+        <text
+          x="570"
+          y="110"
+          fill="rgba(255,255,255,0.30)"
+          fontSize="9"
+          fontFamily="ui-monospace, monospace"
+          textAnchor="end"
+          letterSpacing="2"
+        >
+          OUTPUT
+        </text>
+        <text
+          x="340"
+          y="140"
+          fill="rgba(75, 225, 226, 0.55)"
+          fontSize="8"
+          fontFamily="ui-monospace, monospace"
+          textAnchor="middle"
+          letterSpacing="1.5"
+          className="flow-label-pulse"
+        >
+          CONSTRAINT
+        </text>
+      </svg>
+    </div>
+  );
+}
+
 /* -------------------------- Nav bar --------------------------------- */
 
 function Nav() {
@@ -239,15 +429,25 @@ function Hero() {
             />
           </div>
 
-          {/* trust strip */}
-          <div className="mt-10 lg:mt-14 flex flex-wrap items-center justify-center gap-x-10 gap-y-3 text-xs uppercase tracking-[0.18em] text-white/40">
-            <span>Real-time</span>
-            <span className="w-1 h-1 rounded-full bg-white/20" />
-            <span>SCADA-ready</span>
-            <span className="w-1 h-1 rounded-full bg-white/20" />
-            <span>Days to deploy</span>
-            <span className="w-1 h-1 rounded-full bg-white/20" />
-            <span>No bloat</span>
+          {/* trust strip — 2x2 on mobile, single row on desktop */}
+          <div className="mt-10 lg:mt-14 text-xs uppercase tracking-[0.18em] text-white/40">
+            {/* Mobile: 2x2 grid */}
+            <div className="grid grid-cols-2 gap-y-4 gap-x-6 max-w-[18rem] mx-auto sm:hidden">
+              <span className="text-center">Real-time</span>
+              <span className="text-center">SCADA-ready</span>
+              <span className="text-center">Days to deploy</span>
+              <span className="text-center">No bloat</span>
+            </div>
+            {/* Tablet+ : inline row with dot separators */}
+            <div className="hidden sm:flex flex-wrap items-center justify-center gap-x-10 gap-y-3">
+              <span>Real-time</span>
+              <span className="w-1 h-1 rounded-full bg-white/20" />
+              <span>SCADA-ready</span>
+              <span className="w-1 h-1 rounded-full bg-white/20" />
+              <span>Days to deploy</span>
+              <span className="w-1 h-1 rounded-full bg-white/20" />
+              <span>No bloat</span>
+            </div>
           </div>
         </div>
       </div>
@@ -419,9 +619,9 @@ function BuiltBy() {
             <div className="mt-6 space-y-5 text-[17px] leading-relaxed text-white/70">
               <p>
                 FlowState was born on a real factory floor — not a Silicon Valley
-                whiteboard. Our team ran OEE at scale at Stellantis, chased
-                phantom downtime through SCADA exports, and built the workaround
-                spreadsheets every CI engineer knows.
+                whiteboard. Our team ran OEE at scale inside a Tier-1 OEM,
+                chased phantom downtime through SCADA exports, and built the
+                workaround spreadsheets every CI engineer knows.
               </p>
               <p>
                 We started FlowState because the gap between "the data exists"
@@ -453,19 +653,10 @@ function BuiltBy() {
             className={`relative min-w-0 ${shown ? "fs-fade-up" : "opacity-0"}`}
             style={{ animationDelay: "180ms" }}
           >
-            <div className="relative" style={{ perspective: "1400px" }}>
-              <div
-                style={{
-                  transform: "rotateY(-8deg) rotateX(4deg) rotateZ(-1deg)",
-                }}
-                className="relative"
-              >
-                <div className="absolute -inset-6 bg-gradient-to-br from-[#294D9C]/30 to-[#4BE1E2]/30 blur-3xl rounded-3xl" />
-                <BrowserFrame
-                  src={DashboardImg}
-                  alt="FlowState dashboard tilted view"
-                  className="relative"
-                />
+            <div className="relative">
+              <div className="absolute -inset-8 bg-gradient-to-br from-[#294D9C]/20 to-[#4BE1E2]/20 blur-3xl rounded-3xl pointer-events-none" />
+              <div className="relative rounded-2xl border border-white/10 bg-[#0a1322]/60 p-6 lg:p-8 backdrop-blur-sm">
+                <FlowVisual />
               </div>
             </div>
           </div>
@@ -568,7 +759,7 @@ function DemoSection() {
     onError: () => {
       toast({
         title: "Something went wrong",
-        description: "Please try again, or email hello@flowstateanalytics.com.",
+        description: "Please try again, or email marcus@flowstateanalytics.com.",
         variant: "destructive",
       });
     },
@@ -864,12 +1055,12 @@ function Footer() {
             <ul className="space-y-2.5 text-sm">
               <li>
                 <a
-                  href="mailto:hello@flowstateanalytics.com"
+                  href="mailto:marcus@flowstateanalytics.com"
                   className="inline-flex items-center gap-2 text-white/70 hover:text-white"
                   data-testid="footer-link-email"
                 >
                   <Mail className="h-3.5 w-3.5" />
-                  hello@flowstateanalytics.com
+                  marcus@flowstateanalytics.com
                 </a>
               </li>
               <li>

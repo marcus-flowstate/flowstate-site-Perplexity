@@ -213,4 +213,70 @@
     50% { transform: translateY(-8px); }
   }
   .fs-float { animation: fs-float 6s ease-in-out infinite; }
+
+  /* ---------- Production-line flow visual (BuiltBy section) ---------- */
+
+  /* Build units travel left-to-right along the conveyor; brief pause
+     near the constraint station mid-line, then resume. 9.8s total. */
+  @keyframes flow-build-travel {
+    0%   { transform: translateX(0);   opacity: 0; }
+    4%   { opacity: 0.95; }
+    50%  { transform: translateX(310px); opacity: 0.95; }
+    58%  { transform: translateX(315px); opacity: 0.6; }   /* slight pause at constraint */
+    66%  { transform: translateX(325px); opacity: 0.95; }
+    96%  { opacity: 0.95; }
+    100% { transform: translateX(550px); opacity: 0; }
+  }
+  .flow-build {
+    animation: flow-build-travel 9.8s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .flow-build { animation: none; opacity: 0.6; }
+  }
+
+  /* Healthy stations: gentle ripple. */
+  @keyframes flow-station-pulse {
+    0%, 100% { opacity: 0.85; }
+    50%      { opacity: 0.45; }
+  }
+  .flow-station {
+    animation: flow-station-pulse 4.2s ease-in-out infinite;
+    transform-origin: center;
+  }
+
+  /* Bottleneck station: slower, deeper pulse, brand teal. */
+  @keyframes flow-bottleneck-pulse {
+    0%, 100% { opacity: 1;   r: 6; }
+    50%      { opacity: 0.55; r: 7; }
+  }
+  .flow-station-bottleneck {
+    animation: flow-bottleneck-pulse 3.4s ease-in-out infinite;
+    transform-origin: center;
+  }
+
+  /* Outer ring on bottleneck — expands and fades like a sonar ping. */
+  @keyframes flow-bottleneck-ring {
+    0%   { r: 6;  opacity: 0.7; }
+    100% { r: 22; opacity: 0;   }
+  }
+  .flow-bottleneck-ring {
+    animation: flow-bottleneck-ring 3.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    transform-origin: center;
+  }
+
+  /* CONSTRAINT label gently breathes. */
+  @keyframes flow-label-pulse {
+    0%, 100% { opacity: 0.55; }
+    50%      { opacity: 0.85; }
+  }
+  .flow-label-pulse {
+    animation: flow-label-pulse 3.4s ease-in-out infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .flow-station,
+    .flow-station-bottleneck,
+    .flow-bottleneck-ring,
+    .flow-label-pulse { animation: none; }
+  }
 }
