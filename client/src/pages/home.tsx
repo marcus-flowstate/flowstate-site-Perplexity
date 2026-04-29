@@ -103,46 +103,208 @@ function BrowserFrame({
 }
 
 /* ----------------- Animated production line visual ------------------ */
-/* Calm, hypnotic SVG. 8 stations connected by a flow path. Build units
-   stream left-to-right; one station occasionally pulses amber to suggest
-   a bottleneck moment, and FlowState resolves the flow back to teal.    */
+/* Discrete-event simulation. ~19 slots: 2 input + 6 stations (01,02,05,06,07,08)
+   with buffers between them, + 2 output. Dots advance one slot per tick if
+   the next slot is empty. Stations gate their dot by cycle time.
+
+   Event timeline (loops):
+     t=0    -> STA05 SLOW CYCLE  (yellow)         for ~10s
+     t=10s  -> STA07 DOWN        (red)            for ~8s
+     t=18s  -> healthy gap                        for ~4s
+     t=22s  -> repeat
+   The CONSTRAINT label always renders red, sitting above the active station. */
+
+type StationKind = "healthy" | "slow" | "down";
+type Phase = "sta05_slow" | "sta07_down" | "gap";
+
+// Slot kinds describe each position on the line.
+type SlotKind =
+  | { type: "input" }
+  | { type: "buffer" }
+  | { type: "station"; id: number; label: string }
+  | { type: "output" };
+
+// 19 slots laid out left -> right. Indices are stable.
+const SLOTS: SlotKind[] = [
+  { type: "input" },                                // 0
+  { type: "input" },                                // 1
+  { type: "station", id: 1, label: "01" },          // 2  STA 01
+  { type: "buffer" },                               // 3
+  { type: "station", id: 2, label: "02" },          // 4  STA 02
+  { type: "buffer" },                               // 5
+  { type: "buffer" },                               // 6
+  { type: "buffer" },                               // 7
+  { type: "buffer" },                               // 8
+  { type: "buffer" },                               // 9
+  { type: "station", id: 5, label: "05" },          // 10 STA 05  (constraint anchor)
+  { type: "buffer" },                               // 11
+  { type: "station", id: 6, label: "06" },          // 12 STA 06
+  { type: "buffer" },                               // 13
+  { type: "station", id: 7, label: "07" },          // 14 STA 07
+  { type: "buffer" },                               // 15
+  { type: "station", id: 8, label: "08" },          // 16 STA 08
+  { type: "output" },                               // 17
+  { type: "output" },                               // 18
+];
+
+// Tick = 100ms. Cycle times are in ticks.
+const TICK_MS = 100;
+const HEALTHY_CYCLE = 12;     // 1.2s — stations release this often when healthy
+const SLOW_CYCLE = 35;        // 3.5s — slow cycle
+const INPUT_PERIOD = 12;      // spawn a new dot at slot 0 every 12 ticks
+const PHASE_TICKS = {
+  sta05_slow: 100,            // 10s
+  sta07_down: 80,             // 8s
+  gap: 40,                    // 4s
+};
 
 function FlowVisual({ className = "" }: { className?: string }) {
-  // Stations along the line. Coordinates are within a 600x360 viewBox.
-  const stations = [
-    { x: 60, y: 180 },
-    { x: 130, y: 180 },
-    { x: 200, y: 180 },
-    { x: 270, y: 180 },
-    { x: 340, y: 180 }, // bottleneck index 4
-    { x: 410, y: 180 },
-    { x: 480, y: 180 },
-    { x: 550, y: 180 },
-  ];
-  const bottleneckIndex = 4;
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [running, setRunning] = useState(false);
+  const [reduced, setReduced] = useState(false);
 
-  // 7 build units; staggered animation delays to create a continuous stream.
-  const builds = Array.from({ length: 7 }, (_, i) => i);
+  // Tick counter and simulation state — kept in refs to avoid re-render storms.
+  const tickRef = useRef(0);
+  const phaseRef = useRef<Phase>("sta05_slow");
+  const phaseStartRef = useRef(0);
+  // Slots store dot IDs (number) or null if empty.
+  const slotsRef = useRef<(number | null)[]>(Array(SLOTS.length).fill(null));
+  // Per-station last-release tick — gates cycle time.
+  const lastReleaseRef = useRef<Record<number, number>>({});
+  const lastSpawnRef = useRef(-INPUT_PERIOD);
+  const nextIdRef = useRef(1);
+
+  // Render-state mirrors of the simulation state. We update these every tick
+  // so React can paint the new positions.
+  const [slots, setSlots] = useState<(number | null)[]>(() => Array(SLOTS.length).fill(null));
+  const [phase, setPhase] = useState<Phase>("sta05_slow");
+
+  // Detect reduced motion preference once.
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setReduced(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => setReduced(e.matches);
+    mq.addEventListener?.("change", onChange);
+    return () => mq.removeEventListener?.("change", onChange);
+  }, []);
+
+  // Pause when offscreen — saves battery and avoids drift.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => setRunning(e.isIntersecting));
+      },
+      { threshold: 0.1 }
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  // Simulation tick loop.
+  useEffect(() => {
+    if (!running || reduced) return;
+    let intervalId: number | null = null;
+
+    const step = () => {
+      const t = tickRef.current;
+
+      // 1. Phase transitions
+      const phaseElapsed = t - phaseStartRef.current;
+      const currentPhase = phaseRef.current;
+      if (
+        (currentPhase === "sta05_slow" && phaseElapsed >= PHASE_TICKS.sta05_slow) ||
+        (currentPhase === "sta07_down" && phaseElapsed >= PHASE_TICKS.sta07_down) ||
+        (currentPhase === "gap" && phaseElapsed >= PHASE_TICKS.gap)
+      ) {
+        const next: Phase =
+          currentPhase === "sta05_slow"
+            ? "sta07_down"
+            : currentPhase === "sta07_down"
+            ? "gap"
+            : "sta05_slow";
+        phaseRef.current = next;
+        phaseStartRef.current = t;
+        setPhase(next);
+      }
+
+      // 2. Move dots — iterate from output side back to input so we don't double-move.
+      const sl = slotsRef.current.slice();
+      for (let i = sl.length - 1; i >= 0; i--) {
+        const dot = sl[i];
+        if (dot === null) continue;
+        const slotKind = SLOTS[i];
+
+        // Output — dots disappear once they reach the final slot and tick once.
+        if (slotKind.type === "output" && i === sl.length - 1) {
+          // age-out: clear after one tick at the final slot
+          sl[i] = null;
+          continue;
+        }
+
+        const nextIdx = i + 1;
+        if (nextIdx >= sl.length) continue;
+        if (sl[nextIdx] !== null) continue; // blocked
+
+        // If this slot is a station, it gates by cycle time.
+        if (slotKind.type === "station") {
+          const stationKind = stationStateAt(slotKind.id, phaseRef.current);
+          if (stationKind === "down") continue; // never release
+          const cycle = stationKind === "slow" ? SLOW_CYCLE : HEALTHY_CYCLE;
+          const last = lastReleaseRef.current[slotKind.id] ?? -cycle;
+          if (t - last < cycle) continue;
+          lastReleaseRef.current[slotKind.id] = t;
+        }
+
+        // Move
+        sl[nextIdx] = dot;
+        sl[i] = null;
+      }
+
+      // 3. Spawn new dots at slot 0 if it's empty and enough ticks have passed.
+      if (sl[0] === null && t - lastSpawnRef.current >= INPUT_PERIOD) {
+        sl[0] = nextIdRef.current++;
+        lastSpawnRef.current = t;
+      }
+
+      slotsRef.current = sl;
+      setSlots(sl);
+      tickRef.current = t + 1;
+    };
+
+    intervalId = window.setInterval(step, TICK_MS);
+    return () => {
+      if (intervalId !== null) window.clearInterval(intervalId);
+    };
+  }, [running, reduced]);
+
+  // Layout geometry — viewBox is 800x320; slot pitch = 38px, baseline y = 170.
+  const SLOT_PITCH = 38;
+  const X0 = 30; // left padding
+  const Y_LINE = 170;
+  const slotX = (i: number) => X0 + i * SLOT_PITCH + SLOT_PITCH / 2;
 
   return (
     <div
+      ref={containerRef}
       className={`relative w-full ${className}`}
       data-testid="img-flow-visual"
-      aria-label="Animated production line showing build units flowing through stations"
+      aria-label="Animated production line simulation showing dots flowing through stations with a constraint event"
     >
       <svg
-        viewBox="0 0 600 360"
+        viewBox="0 0 800 320"
         className="w-full h-auto block"
         xmlns="http://www.w3.org/2000/svg"
         role="img"
       >
         <defs>
-          {/* Brand gradient for the conveyor path */}
           <linearGradient id="flowConveyor" x1="0" y1="0" x2="1" y2="0">
             <stop offset="0%" stopColor="#294D9C" stopOpacity="0.0" />
-            <stop offset="15%" stopColor="#294D9C" stopOpacity="0.55" />
-            <stop offset="50%" stopColor="#3A88B6" stopOpacity="0.7" />
-            <stop offset="85%" stopColor="#4BE1E2" stopOpacity="0.55" />
+            <stop offset="12%" stopColor="#294D9C" stopOpacity="0.55" />
+            <stop offset="50%" stopColor="#3A88B6" stopOpacity="0.65" />
+            <stop offset="88%" stopColor="#4BE1E2" stopOpacity="0.55" />
             <stop offset="100%" stopColor="#4BE1E2" stopOpacity="0.0" />
           </linearGradient>
           <linearGradient id="flowBuild" x1="0" y1="0" x2="1" y2="1">
@@ -150,7 +312,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
             <stop offset="100%" stopColor="#3A88B6" />
           </linearGradient>
           <radialGradient id="flowGlow" cx="0.5" cy="0.5" r="0.5">
-            <stop offset="0%" stopColor="#4BE1E2" stopOpacity="0.35" />
+            <stop offset="0%" stopColor="#4BE1E2" stopOpacity="0.30" />
             <stop offset="100%" stopColor="#4BE1E2" stopOpacity="0" />
           </radialGradient>
           <filter id="flowSoftBlur">
@@ -159,137 +321,199 @@ function FlowVisual({ className = "" }: { className?: string }) {
         </defs>
 
         {/* Soft background glow */}
-        <ellipse cx="300" cy="180" rx="280" ry="90" fill="url(#flowGlow)" />
+        <ellipse cx="400" cy="170" rx="360" ry="80" fill="url(#flowGlow)" />
 
-        {/* Subtle grid lines for the floor plane */}
+        {/* Floor grid */}
         <g stroke="rgba(255,255,255,0.04)" strokeWidth="1">
-          <line x1="0" y1="260" x2="600" y2="260" />
-          <line x1="0" y1="290" x2="600" y2="290" />
-          <line x1="0" y1="320" x2="600" y2="320" />
+          <line x1="0" y1="240" x2="800" y2="240" />
+          <line x1="0" y1="270" x2="800" y2="270" />
+          <line x1="0" y1="300" x2="800" y2="300" />
         </g>
 
-        {/* Conveyor path — the flow line */}
+        {/* Conveyor path */}
         <line
-          x1="30"
-          y1="180"
-          x2="580"
-          y2="180"
+          x1={X0}
+          y1={Y_LINE}
+          x2={X0 + SLOTS.length * SLOT_PITCH}
+          y2={Y_LINE}
           stroke="url(#flowConveyor)"
           strokeWidth="2"
         />
         <line
-          x1="30"
-          y1="180"
-          x2="580"
-          y2="180"
-          stroke="rgba(75, 225, 226, 0.15)"
+          x1={X0}
+          y1={Y_LINE}
+          x2={X0 + SLOTS.length * SLOT_PITCH}
+          y2={Y_LINE}
+          stroke="rgba(75, 225, 226, 0.12)"
           strokeWidth="6"
           filter="url(#flowSoftBlur)"
         />
 
-        {/* Stations */}
-        {stations.map((s, i) => {
-          const isBottleneck = i === bottleneckIndex;
+        {/* Stations — render boxes below baseline; label below box. */}
+        {SLOTS.map((slot, i) => {
+          if (slot.type !== "station") return null;
+          const cx = slotX(i);
+          const kind = stationStateAt(slot.id, phase);
+          const boxW = 32;
+          const boxH = 36;
+          const boxX = cx - boxW / 2;
+          const boxY = Y_LINE - boxH / 2;
+
+          // Base healthy treatment
+          let stroke = "rgba(255,255,255,0.18)";
+          let fill = "rgba(255,255,255,0.03)";
+          let textInside: string | null = null;
+          let textColor = "#fff";
+          let strokeWidth = 1;
+          let twoLine = false;
+          if (kind === "slow") {
+            stroke = "#F5C518";
+            fill = "rgba(245, 197, 24, 0.18)";
+            textInside = "SLOW CYCLE";
+            textColor = "#F5C518";
+            strokeWidth = 2;
+            twoLine = true;
+          } else if (kind === "down") {
+            stroke = "#E54B4B";
+            fill = "rgba(229, 75, 75, 0.22)";
+            textInside = "DOWN";
+            textColor = "#E54B4B";
+            strokeWidth = 2;
+          }
+
           return (
-            <g key={i}>
-              {/* Station base — small rectangle below the line */}
+            <g key={`sta-${slot.id}`}>
+              {/* CONSTRAINT label — only on the active constrained station */}
+              {kind !== "healthy" && (
+                <text
+                  x={cx}
+                  y={Y_LINE - boxH / 2 - 12}
+                  fill="#E54B4B"
+                  fontSize="9"
+                  fontFamily="ui-monospace, monospace"
+                  textAnchor="middle"
+                  letterSpacing="1.5"
+                  fontWeight="600"
+                >
+                  CONSTRAINT
+                </text>
+              )}
+              {/* Box */}
               <rect
-                x={s.x - 14}
-                y={s.y + 10}
-                width="28"
-                height="38"
-                rx="4"
-                fill="rgba(255,255,255,0.03)"
-                stroke="rgba(255,255,255,0.10)"
-                strokeWidth="1"
+                x={boxX}
+                y={boxY}
+                width={boxW}
+                height={boxH}
+                rx="3"
+                fill={fill}
+                stroke={stroke}
+                strokeWidth={strokeWidth}
               />
+              {/* Inside text — single label per box (DOWN or SLOW CYCLE) */}
+              {textInside && !twoLine && (
+                <text
+                  x={cx}
+                  y={Y_LINE + 3}
+                  fill={textColor}
+                  fontSize="7.5"
+                  fontFamily="ui-monospace, monospace"
+                  textAnchor="middle"
+                  letterSpacing="1"
+                  fontWeight="700"
+                >
+                  {textInside}
+                </text>
+              )}
+              {textInside && twoLine && (
+                <>
+                  <text
+                    x={cx}
+                    y={Y_LINE - 1}
+                    fill={textColor}
+                    fontSize="7"
+                    fontFamily="ui-monospace, monospace"
+                    textAnchor="middle"
+                    letterSpacing="0.5"
+                    fontWeight="700"
+                  >
+                    SLOW
+                  </text>
+                  <text
+                    x={cx}
+                    y={Y_LINE + 8}
+                    fill={textColor}
+                    fontSize="7"
+                    fontFamily="ui-monospace, monospace"
+                    textAnchor="middle"
+                    letterSpacing="0.5"
+                    fontWeight="700"
+                  >
+                    CYCLE
+                  </text>
+                </>
+              )}
+              {/* Station label below box: STA / 05 stacked */}
               <text
-                x={s.x}
-                y={s.y + 64}
-                fill="rgba(255,255,255,0.30)"
-                fontSize="8"
+                x={cx}
+                y={Y_LINE + boxH / 2 + 14}
+                fill="rgba(255,255,255,0.45)"
+                fontSize="7.5"
                 fontFamily="ui-monospace, monospace"
                 textAnchor="middle"
-                letterSpacing="1"
+                letterSpacing="1.5"
               >
-                {`L${(i + 1).toString().padStart(2, "0")}`}
+                STA
               </text>
-              {/* Station node — pulses if bottleneck */}
-              <circle
-                cx={s.x}
-                cy={s.y}
-                r={isBottleneck ? 6 : 4}
-                fill={isBottleneck ? "#3A88B6" : "#4BE1E2"}
-                opacity={isBottleneck ? 1 : 0.85}
-                className={isBottleneck ? "flow-station-bottleneck" : "flow-station"}
-                style={{ animationDelay: `${i * 0.35}s` }}
-              />
-              {/* Outer ring on bottleneck */}
-              {isBottleneck && (
-                <circle
-                  cx={s.x}
-                  cy={s.y}
-                  r="6"
-                  fill="none"
-                  stroke="#3A88B6"
-                  strokeWidth="1.5"
-                  className="flow-bottleneck-ring"
-                />
-              )}
+              <text
+                x={cx}
+                y={Y_LINE + boxH / 2 + 24}
+                fill="rgba(255,255,255,0.65)"
+                fontSize="8.5"
+                fontFamily="ui-monospace, monospace"
+                textAnchor="middle"
+                letterSpacing="1.5"
+                fontWeight="600"
+              >
+                {slot.label}
+              </text>
             </g>
           );
         })}
 
-        {/* Build units flowing along the line */}
-        {builds.map((i) => (
-          <circle
-            key={i}
-            cx="30"
-            cy="180"
-            r="2.5"
-            fill="url(#flowBuild)"
-            className="flow-build"
-            style={{ animationDelay: `${i * 1.4}s` }}
-          />
-        ))}
-
-        {/* Subtle quiet labels above the line */}
-        <text
-          x="30"
-          y="110"
-          fill="rgba(255,255,255,0.30)"
-          fontSize="9"
-          fontFamily="ui-monospace, monospace"
-          letterSpacing="2"
-        >
-          INPUT
-        </text>
-        <text
-          x="570"
-          y="110"
-          fill="rgba(255,255,255,0.30)"
-          fontSize="9"
-          fontFamily="ui-monospace, monospace"
-          textAnchor="end"
-          letterSpacing="2"
-        >
-          OUTPUT
-        </text>
-        <text
-          x="340"
-          y="140"
-          fill="rgba(75, 225, 226, 0.55)"
-          fontSize="8"
-          fontFamily="ui-monospace, monospace"
-          textAnchor="middle"
-          letterSpacing="1.5"
-          className="flow-label-pulse"
-        >
-          CONSTRAINT
-        </text>
+        {/* Dots — one per occupied slot. */}
+        {slots.map((dot, i) => {
+          if (dot === null) return null;
+          const slotKind = SLOTS[i];
+          // Don't render dots inside station boxes that are DOWN — visually they sit
+          // inside the box but the colored fill makes them hard to see; show a slightly
+          // dimmed version.
+          let opacity = 0.95;
+          if (slotKind.type === "station") {
+            const k = stationStateAt(slotKind.id, phase);
+            if (k === "down") opacity = 0.5;
+            if (k === "slow") opacity = 0.85;
+          }
+          return (
+            <g
+              key={`dot-${dot}`}
+              transform={`translate(${slotX(i)} ${Y_LINE})`}
+              style={{ transition: `transform ${TICK_MS}ms linear, opacity 200ms ease` }}
+              opacity={opacity}
+            >
+              <circle cx="0" cy="0" r="4" fill="url(#flowBuild)" />
+            </g>
+          );
+        })}
       </svg>
     </div>
   );
+}
+
+// Returns the visual state of a station given the current phase.
+function stationStateAt(stationId: number, phase: Phase): StationKind {
+  if (phase === "sta05_slow" && stationId === 5) return "slow";
+  if (phase === "sta07_down" && stationId === 7) return "down";
+  return "healthy";
 }
 
 /* -------------------------- Nav bar --------------------------------- */
