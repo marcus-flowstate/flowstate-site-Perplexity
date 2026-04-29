@@ -166,7 +166,7 @@ const BUFFER_05_07_END = 32; // inclusive — 9 slots total
 const STA05_INDEX = 23;
 
 // Tick = 100ms. Cycle times are in ticks.
-const TICK_MS = 100;
+const TICK_MS = 50;        // 50ms per tick → loop runs 2x as fast as 100ms baseline.
 const HEALTHY_CYCLE = 12;     // 1.2s — stations release this often when healthy
 const SLOW_CYCLE = 17;        // 1.7s — slow cycle
 const INPUT_PERIOD = 12;      // spawn a new dot at slot 0 every 12 ticks
@@ -543,14 +543,16 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   strokeWidth="1"
                 />
 
+                {/* Bars use a single FlowState blue regardless of source station —
+                    losses are unified visually, not attributed to a station's color. */}
                 {/* STA 05 bar — directly above STA 05 station */}
                 <rect
                   x={s5cx - barW / 2}
                   y={baseline - s5H}
                   width={barW}
                   height={s5H}
-                  fill="rgba(245, 197, 24, 0.30)"
-                  stroke="#F5C518"
+                  fill="rgba(58, 136, 182, 0.30)"
+                  stroke="#3A88B6"
                   strokeWidth="1.5"
                   style={{
                     transition: `y ${TICK_MS}ms linear, height ${TICK_MS}ms linear`,
@@ -561,7 +563,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   <text
                     x={s5cx}
                     y={baseline - s5H + 22}
-                    fill="#F5C518"
+                    fill="#3A88B6"
                     fontSize="22"
                     fontFamily="var(--font-sans)"
                     textAnchor="middle"
@@ -578,8 +580,8 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   y={baseline - s7H}
                   width={barW}
                   height={s7H}
-                  fill="rgba(229, 75, 75, 0.30)"
-                  stroke="#E54B4B"
+                  fill="rgba(58, 136, 182, 0.30)"
+                  stroke="#3A88B6"
                   strokeWidth="1.5"
                   style={{
                     transition: `y ${TICK_MS}ms linear, height ${TICK_MS}ms linear`,
@@ -589,7 +591,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   <text
                     x={s7cx}
                     y={baseline - s7H + 22}
-                    fill="#E54B4B"
+                    fill="#3A88B6"
                     fontSize="22"
                     fontFamily="var(--font-sans)"
                     textAnchor="middle"
@@ -732,7 +734,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   fontSize="22"
                   fontFamily="var(--font-sans)"
                   textAnchor="middle"
-                  letterSpacing="3"
+                  letterSpacing="0"
                   fontWeight="700"
                 >
                   CONSTRAINT
@@ -748,7 +750,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
                     fontSize="22"
                     fontFamily="var(--font-sans)"
                     textAnchor="middle"
-                    letterSpacing="3"
+                    letterSpacing="0"
                     fontWeight="700"
                   >
                     BLOCKED
@@ -769,12 +771,12 @@ function FlowVisual({ className = "" }: { className?: string }) {
               {textInside && !twoLine && (
                 <text
                   x={cx}
-                  y={boxY + boxH / 2 + 7}
+                  y={boxY + boxH / 2 + 6}
                   fill={textColor}
-                  fontSize="22"
+                  fontSize="18"
                   fontFamily="var(--font-sans)"
                   textAnchor="middle"
-                  letterSpacing="2"
+                  letterSpacing="1"
                   fontWeight="700"
                 >
                   {textInside}
@@ -784,24 +786,24 @@ function FlowVisual({ className = "" }: { className?: string }) {
                 <>
                   <text
                     x={cx}
-                    y={boxY + boxH / 2 - 6}
+                    y={boxY + boxH / 2 - 4}
                     fill={textColor}
-                    fontSize="22"
+                    fontSize="18"
                     fontFamily="var(--font-sans)"
                     textAnchor="middle"
-                    letterSpacing="1.5"
+                    letterSpacing="1"
                     fontWeight="700"
                   >
                     SLOW
                   </text>
                   <text
                     x={cx}
-                    y={boxY + boxH / 2 + 22}
+                    y={boxY + boxH / 2 + 18}
                     fill={textColor}
-                    fontSize="22"
+                    fontSize="18"
                     fontFamily="var(--font-sans)"
                     textAnchor="middle"
-                    letterSpacing="1.5"
+                    letterSpacing="1"
                     fontWeight="700"
                   >
                     CYCLE
