@@ -135,6 +135,16 @@
     background-clip: text;
     color: transparent;
     -webkit-text-fill-color: transparent;
+    /* Prevent descender clipping (e.g., the 'g' in "losing") on some browsers */
+    padding-bottom: 0.08em;
+  }
+  /* Inline gradient inside a larger heading: keep it on the baseline
+     without breaking layout, but still allow descenders to render fully. */
+  .fs-gradient-text-tight {
+    display: inline-block;
+    line-height: inherit;
+    padding-bottom: 0.12em;
+    margin-bottom: -0.12em;
   }
   .fs-gradient-bg {
     background: linear-gradient(135deg, #294D9C 0%, #3A88B6 50%, #4BE1E2 100%);

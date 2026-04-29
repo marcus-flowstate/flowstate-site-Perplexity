@@ -187,10 +187,12 @@ const PHASE_TICKS = {
   gap: 30,                     // 3s healthy gap, then bar chart resets
 };
 
-// Slots immediately downstream of STA 05. When BOTH are vacant after recovery,
-// the CONSTRAINT label moves back to STA 05.
-const POST_STA05_SLOT_A = 24;
-const POST_STA05_SLOT_B = 25;
+// Buffer between STA 05 and STA 07 (slots 24-32 inclusive, 9 slots total).
+// CONSTRAINT label is now FULLY EVENT-DRIVEN by this buffer:
+//   - Moves to STA 07 only when ALL 9 slots are occupied (true gridlock).
+//   - Returns to STA 05 the moment ANY one of the 9 slots becomes empty.
+const BUFFER_05_07_START = 24;
+const BUFFER_05_07_END = 32; // inclusive
 
 function FlowVisual({ className = "" }: { className?: string }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -323,8 +325,8 @@ function FlowVisual({ className = "" }: { className?: string }) {
       ) {
         nextPhase = "sta07_recover_linger";
       } else if (currentPhase === "sta07_recover_linger") {
-        // Linger ends when CONSTRAINT has already moved back to STA 05 AND
-        // we've shown that for ~2s, OR after a safety cap.
+        // Linger ends when the buffer has at least 1 empty slot AND we've shown
+        // CONSTRAINT back on STA 05 for ~2s, OR after a safety cap.
         const movedBackTick = constraintBackTickRef.current;
         if (movedBackTick !== null && t - movedBackTick >= 20) {
           nextPhase = "gap";
@@ -340,43 +342,49 @@ function FlowVisual({ className = "" }: { className?: string }) {
         phaseStartRef.current = t;
         setPhase(nextPhase);
 
-        // Update constraint label location based on the new phase.
-        let nextConstraint: 5 | 7 | null = constraintAtRef.current;
+        // Hard reset at start of each cycle.
         if (nextPhase === "sta05_slow_only") {
-          nextConstraint = 5;
-          // Hard reset losses bar and the "moved back" timer at start of cycle.
           lossesRef.current = { s5: 0, s7: 0 };
           setLosses({ s5: 0, s7: 0 });
           constraintBackTickRef.current = null;
-        } else if (nextPhase === "sta07_down_pre_block") {
-          nextConstraint = 5; // stays on STA 05 until block detected
-        } else if (nextPhase === "sta07_down_post_block") {
-          nextConstraint = 7; // shifts on block
-        } else if (nextPhase === "sta07_recover_green") {
-          nextConstraint = 7; // stays on STA 07 through green flash
-        } else if (nextPhase === "sta07_recover_linger") {
-          nextConstraint = 7; // starts on STA 07 — may move back to 5 mid-phase
-        } else if (nextPhase === "gap") {
-          nextConstraint = null;
-        }
-        if (nextConstraint !== constraintAtRef.current) {
-          constraintAtRef.current = nextConstraint;
-          setConstraintAt(nextConstraint);
         }
       }
 
-      // 1b. During linger, watch for buffer drain: once both slots immediately
-      // downstream of STA 05 are vacant, the CONSTRAINT label moves back to
-      // STA 05 (because that's the real bottleneck again now that STA 07 is healthy).
-      if (
-        phaseRef.current === "sta07_recover_linger" &&
-        constraintAtRef.current === 7 &&
-        slotsRef.current[POST_STA05_SLOT_A] === null &&
-        slotsRef.current[POST_STA05_SLOT_B] === null
-      ) {
-        constraintAtRef.current = 5;
-        setConstraintAt(5);
-        constraintBackTickRef.current = t;
+      // 1b. EVENT-DRIVEN CONSTRAINT POSITIONING.
+      // The CONSTRAINT label is no longer tied to phase — it's driven entirely
+      // by buffer state between STA 05 and STA 07:
+      //   • During gap phase, no CONSTRAINT.
+      //   • Otherwise: full buffer → STA 07; any empty slot → STA 05.
+      {
+        const phaseNow = phaseRef.current;
+        let desired: 5 | 7 | null = constraintAtRef.current;
+        if (phaseNow === "gap") {
+          desired = null;
+        } else {
+          // Check buffer fullness.
+          let allFull = true;
+          const sl = slotsRef.current;
+          for (let i = BUFFER_05_07_START; i <= BUFFER_05_07_END; i++) {
+            if (sl[i] === null) {
+              allFull = false;
+              break;
+            }
+          }
+          desired = allFull ? 7 : 5;
+        }
+        if (desired !== constraintAtRef.current) {
+          // Track tick when CONSTRAINT moves back to STA 05 (used by linger phase
+          // to time the brief "back-on-05" window before entering gap).
+          if (
+            desired === 5 &&
+            constraintAtRef.current === 7 &&
+            phaseNow === "sta07_recover_linger"
+          ) {
+            constraintBackTickRef.current = t;
+          }
+          constraintAtRef.current = desired;
+          setConstraintAt(desired);
+        }
       }
 
       // 2. Accumulate losses every tick the constraint sits on a station.
@@ -462,13 +470,14 @@ function FlowVisual({ className = "" }: { className?: string }) {
   const SLOT_PITCH = 24;
   const X0 = 30;
   // Increased vertical space: big LOSSES title, bar chart, line, big PRODUCTION LINE title.
-  const CHART_TITLE_Y = 26;        // big "LOSSES THIS CYCLE" title
-  const CHART_Y = 50;              // top of chart frame
-  const CHART_H = 130;             // taller chart so bars are readable
-  const Y_LINE = CHART_Y + CHART_H + 70;  // ~250 — leaves room for chart + station hint
-  const SLOT_CELL_H = 22;          // taller slot grid
+  // All text in this section is roughly doubled vs. round 5 for floor-display readability.
+  const CHART_TITLE_Y = 38;        // big "LOSSES THIS CYCLE" title
+  const CHART_Y = 70;              // top of chart frame (more room above for bigger title)
+  const CHART_H = 170;             // taller chart so bars are readable + room for axis caption
+  const Y_LINE = CHART_Y + CHART_H + 90;  // leaves room for chart + station hint
+  const SLOT_CELL_H = 26;          // taller slot grid
   const VB_W = X0 * 2 + SLOTS.length * SLOT_PITCH; // 30 + 37*24 + 30 = 948
-  const VB_H = Y_LINE + 170;       // leaves room for taller boxes, labels, big title below
+  const VB_H = Y_LINE + 240;       // leaves room for taller boxes, larger labels, big title below
   const slotX = (i: number) => X0 + i * SLOT_PITCH + SLOT_PITCH / 2;
 
   // Bar chart layout — spans the full width so bars can sit directly above
@@ -525,10 +534,10 @@ function FlowVisual({ className = "" }: { className?: string }) {
             x={VB_W / 2}
             y={CHART_TITLE_Y}
             fill="rgba(255,255,255,0.92)"
-            fontSize="18"
+            fontSize="30"
             fontFamily="ui-monospace, monospace"
             textAnchor="middle"
-            letterSpacing="3"
+            letterSpacing="4"
             fontWeight="700"
           >
             LOSSES THIS CYCLE
@@ -546,8 +555,8 @@ function FlowVisual({ className = "" }: { className?: string }) {
           />
           {/* Baseline aligned along the bottom of the chart */}
           {(() => {
-            const baseline = CHART_Y + CHART_H - 18;
-            const barW = SLOT_PITCH * 1.6; // wider — ~38px, more readable
+            const baseline = CHART_Y + CHART_H - 24;
+            const barW = SLOT_PITCH * 2.0; // wider — ~48px, more readable
             // Find STA 05 and STA 07 slot indices.
             const sta05Idx = SLOTS.findIndex(
               (s) => s.type === "station" && s.id === 5
@@ -585,18 +594,18 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   }}
                 />
                 {/* STA 05 value label on top of bar (when bar is tall enough) */}
-                {s5H > 18 && (
+                {s5H > 28 && (
                   <text
                     x={s5cx}
-                    y={baseline - s5H + 12}
+                    y={baseline - s5H + 22}
                     fill="#F5C518"
-                    fontSize="11"
+                    fontSize="22"
                     fontFamily="ui-monospace, monospace"
                     textAnchor="middle"
-                    letterSpacing="0.6"
+                    letterSpacing="1"
                     fontWeight="700"
                   >
-                    {(losses.s5 / 10).toFixed(1)}s
+                    {Math.floor(losses.s5 / 10)}
                   </text>
                 )}
 
@@ -613,32 +622,32 @@ function FlowVisual({ className = "" }: { className?: string }) {
                     transition: `y ${TICK_MS}ms linear, height ${TICK_MS}ms linear`,
                   }}
                 />
-                {s7H > 18 && (
+                {s7H > 28 && (
                   <text
                     x={s7cx}
-                    y={baseline - s7H + 12}
+                    y={baseline - s7H + 22}
                     fill="#E54B4B"
-                    fontSize="11"
+                    fontSize="22"
                     fontFamily="ui-monospace, monospace"
                     textAnchor="middle"
-                    letterSpacing="0.6"
+                    letterSpacing="1"
                     fontWeight="700"
                   >
-                    {(losses.s7 / 10).toFixed(1)}s
+                    {Math.floor(losses.s7 / 10)}
                   </text>
                 )}
 
                 {/* Y-axis caption (top-left) */}
                 <text
-                  x={CHART_X + 10}
-                  y={CHART_Y + 18}
-                  fill="rgba(255,255,255,0.50)"
-                  fontSize="10"
+                  x={CHART_X + 14}
+                  y={CHART_Y + 26}
+                  fill="rgba(255,255,255,0.65)"
+                  fontSize="18"
                   fontFamily="ui-monospace, monospace"
-                  letterSpacing="1.2"
-                  fontWeight="600"
+                  letterSpacing="2"
+                  fontWeight="700"
                 >
-                  TIME ON CONSTRAINT (s)
+                  LOST BUILDS
                 </text>
               </>
             );
@@ -697,10 +706,10 @@ function FlowVisual({ className = "" }: { className?: string }) {
           const cx = slotX(i);
           const kind = stationStateAt(slot.id, phase);
           const isConstrained = constraintAt === slot.id;
-          const boxW = 56;
-          const boxH = 64;
+          const boxW = 80;
+          const boxH = 90;
           const boxX = cx - boxW / 2;
-          const boxY = Y_LINE + SLOT_CELL_H / 2 + 12;
+          const boxY = Y_LINE + SLOT_CELL_H / 2 + 16;
 
           // Base healthy treatment
           let stroke = "rgba(255,255,255,0.20)";
@@ -755,12 +764,12 @@ function FlowVisual({ className = "" }: { className?: string }) {
               {isConstrained && (
                 <text
                   x={cx}
-                  y={Y_LINE - SLOT_CELL_H / 2 - 10}
+                  y={Y_LINE - SLOT_CELL_H / 2 - 14}
                   fill="#E54B4B"
-                  fontSize="12"
+                  fontSize="22"
                   fontFamily="ui-monospace, monospace"
                   textAnchor="middle"
-                  letterSpacing="2"
+                  letterSpacing="3"
                   fontWeight="700"
                 >
                   CONSTRAINT
@@ -781,12 +790,12 @@ function FlowVisual({ className = "" }: { className?: string }) {
               {textInside && !twoLine && (
                 <text
                   x={cx}
-                  y={boxY + boxH / 2 + 5}
+                  y={boxY + boxH / 2 + 7}
                   fill={textColor}
-                  fontSize="13"
+                  fontSize="22"
                   fontFamily="ui-monospace, monospace"
                   textAnchor="middle"
-                  letterSpacing="1.6"
+                  letterSpacing="2"
                   fontWeight="700"
                 >
                   {textInside}
@@ -796,24 +805,24 @@ function FlowVisual({ className = "" }: { className?: string }) {
                 <>
                   <text
                     x={cx}
-                    y={boxY + boxH / 2 - 4}
+                    y={boxY + boxH / 2 - 6}
                     fill={textColor}
-                    fontSize="13"
+                    fontSize="22"
                     fontFamily="ui-monospace, monospace"
                     textAnchor="middle"
-                    letterSpacing="1"
+                    letterSpacing="1.5"
                     fontWeight="700"
                   >
                     SLOW
                   </text>
                   <text
                     x={cx}
-                    y={boxY + boxH / 2 + 14}
+                    y={boxY + boxH / 2 + 22}
                     fill={textColor}
-                    fontSize="13"
+                    fontSize="22"
                     fontFamily="ui-monospace, monospace"
                     textAnchor="middle"
-                    letterSpacing="1"
+                    letterSpacing="1.5"
                     fontWeight="700"
                   >
                     CYCLE
@@ -823,13 +832,13 @@ function FlowVisual({ className = "" }: { className?: string }) {
               {/* Station label below box: "STA 01" */}
               <text
                 x={cx}
-                y={boxY + boxH + 18}
-                fill="rgba(255,255,255,0.75)"
-                fontSize="13"
+                y={boxY + boxH + 28}
+                fill="rgba(255,255,255,0.85)"
+                fontSize="22"
                 fontFamily="ui-monospace, monospace"
                 textAnchor="middle"
-                letterSpacing="2"
-                fontWeight="600"
+                letterSpacing="3"
+                fontWeight="700"
               >
                 STA {slot.label}
               </text>
@@ -856,7 +865,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
               }}
               opacity={opacity}
             >
-              <circle cx="0" cy="0" r="4.5" fill="url(#flowBuild)" />
+              <circle cx="0" cy="0" r="5.5" fill="url(#flowBuild)" />
             </g>
           );
         })}
@@ -864,12 +873,12 @@ function FlowVisual({ className = "" }: { className?: string }) {
         {/* Big title BELOW the line diagram */}
         <text
           x={VB_W / 2}
-          y={VB_H - 20}
+          y={VB_H - 28}
           fill="rgba(255,255,255,0.92)"
-          fontSize="18"
+          fontSize="30"
           fontFamily="ui-monospace, monospace"
           textAnchor="middle"
-          letterSpacing="3"
+          letterSpacing="4"
           fontWeight="700"
         >
           PRODUCTION LINE — LINE 1
@@ -954,9 +963,15 @@ function Nav() {
           <Button
             onClick={() => scrollToId("demo")}
             size="sm"
-            className="bg-white text-[hsl(220_38%_8%)] hover:bg-white/90 font-semibold rounded-full px-5"
+            className="bg-white text-[hsl(220_38%_8%)] hover:bg-white/90 font-semibold rounded-full pl-2.5 pr-5"
             data-testid="button-nav-demo"
           >
+            <img
+              src={IconSvgUrl}
+              alt=""
+              aria-hidden="true"
+              className="h-5 w-5 mr-2"
+            />
             Request a demo
             <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
           </Button>
@@ -976,6 +991,19 @@ function Hero() {
       <div className="absolute inset-0 fs-radial-glow pointer-events-none" />
       <div className="absolute inset-0 fs-grid-bg pointer-events-none opacity-50" />
       <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[1200px] h-[600px] bg-[radial-gradient(ellipse_at_center,rgba(75,225,226,0.12),transparent_70%)] pointer-events-none" />
+      {/* Large subtle FlowState icon watermark, off-canvas right edge */}
+      <img
+        src={IconSvgUrl}
+        alt=""
+        aria-hidden="true"
+        className="pointer-events-none select-none absolute -left-32 top-24 w-[520px] lg:w-[680px] opacity-[0.035]"
+      />
+      <img
+        src={IconSvgUrl}
+        alt=""
+        aria-hidden="true"
+        className="pointer-events-none select-none absolute -right-40 -bottom-32 w-[480px] lg:w-[640px] opacity-[0.04]"
+      />
 
       <div className="relative max-w-7xl mx-auto px-6 lg:px-8" ref={ref}>
         <div className={`text-center max-w-4xl mx-auto ${shown ? "fs-fade-up" : "opacity-0"}`}>
@@ -984,10 +1012,13 @@ function Hero() {
             Built for discrete manufacturing
           </div>
 
-          {/* Force three rows on every viewport — matches iOS hero rhythm */}
-          <h1 className="text-[2.5rem] leading-[1.08] sm:text-5xl sm:leading-[1.05] lg:text-7xl lg:leading-[1.02] font-semibold tracking-tight text-white">
-            <span className="block">See where your line</span>
-            <span className="fs-gradient-text block">is losing builds.</span>
+          {/* Force three rows on every viewport — matches Marcus's mockup */}
+          <h1 className="text-[2.5rem] leading-[1.12] sm:text-5xl sm:leading-[1.08] lg:text-7xl lg:leading-[1.06] font-semibold tracking-tight text-white">
+            <span className="block">See where your</span>
+            <span className="block">
+              line is{" "}
+              <span className="fs-gradient-text fs-gradient-text-tight">losing builds.</span>
+            </span>
             <span className="text-white/60 block">Then act on it.</span>
           </h1>
 
@@ -1218,6 +1249,7 @@ function BuiltBy() {
         className="pointer-events-none select-none absolute -right-16 -bottom-16 w-[420px] lg:w-[560px] opacity-[0.04]"
       />
       <div className="relative max-w-7xl mx-auto px-6 lg:px-8">
+        {/* Top row: copy + stats */}
         <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
           <div className={`min-w-0 ${shown ? "fs-fade-up" : "opacity-0"}`}>
             <p className="text-xs uppercase tracking-[0.2em] text-[hsl(192_53%_60%)] font-semibold mb-4">
@@ -1242,15 +1274,20 @@ function BuiltBy() {
                 for the floor.
               </p>
             </div>
+          </div>
 
-            <div className="mt-10 grid grid-cols-1 sm:grid-cols-3 gap-6 max-w-md">
+          <div
+            className={`min-w-0 ${shown ? "fs-fade-up" : "opacity-0"}`}
+            style={{ animationDelay: "100ms" }}
+          >
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
               {[
                 { v: "10+", l: "Years on the plant floor" },
                 { v: "Days", l: "From kickoff to insight" },
                 { v: "0", l: "Rip-and-replace required" },
               ].map((s) => (
                 <div key={s.l}>
-                  <div className="text-3xl font-semibold fs-gradient-text">
+                  <div className="text-4xl lg:text-5xl font-semibold fs-gradient-text fs-gradient-text-tight">
                     {s.v}
                   </div>
                   <div className="text-xs uppercase tracking-wider text-white/45 mt-1">
@@ -1260,16 +1297,17 @@ function BuiltBy() {
               ))}
             </div>
           </div>
+        </div>
 
-          <div
-            className={`relative min-w-0 ${shown ? "fs-fade-up" : "opacity-0"}`}
-            style={{ animationDelay: "180ms" }}
-          >
-            <div className="relative">
-              <div className="absolute -inset-8 bg-gradient-to-br from-[#294D9C]/20 to-[#4BE1E2]/20 blur-3xl rounded-3xl pointer-events-none" />
-              <div className="relative rounded-2xl border border-white/10 bg-[#0a1322]/60 p-6 lg:p-8 backdrop-blur-sm">
-                <FlowVisual />
-              </div>
+        {/* Full-width motion line diagram */}
+        <div
+          className={`relative mt-16 lg:mt-20 ${shown ? "fs-fade-up" : "opacity-0"}`}
+          style={{ animationDelay: "180ms" }}
+        >
+          <div className="relative">
+            <div className="absolute -inset-8 bg-gradient-to-br from-[#294D9C]/20 to-[#4BE1E2]/20 blur-3xl rounded-3xl pointer-events-none" />
+            <div className="relative rounded-2xl border border-white/10 bg-[#0a1322]/60 p-6 lg:p-10 backdrop-blur-sm">
+              <FlowVisual />
             </div>
           </div>
         </div>
