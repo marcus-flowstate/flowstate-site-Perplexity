@@ -103,13 +103,16 @@ function BrowserFrame({
 }
 
 /* ----------------- Animated production line visual ------------------ */
-/* Discrete-event simulation. ~19 slots: 2 input + 6 stations (01,02,05,06,07,08)
-   with buffers between them, + 2 output. Dots advance one slot per tick if
-   the next slot is empty. Stations gate their dot by cycle time.
+/* Discrete-event simulation. 7 stations (L01–L07) with uniform invisible
+   slot grid: ~3 input + 4 between every station pair + ~3 output.
+   Dots advance one slot per tick if the next slot is empty AND has been
+   empty for at least RELEASE_DELAY ticks (the 0.1s pallet release delay,
+   so dots cascade instead of moving as a solid block).
+   Stations gate their dot by cycle time (healthy / slow / down).
 
    Event timeline (loops):
-     t=0    -> STA05 SLOW CYCLE  (yellow)         for ~10s
-     t=10s  -> STA07 DOWN        (red)            for ~8s
+     t=0    -> STA 05 SLOW CYCLE  (yellow)        for ~10s
+     t=10s  -> STA 07 DOWN        (red)           for ~8s
      t=18s  -> healthy gap                        for ~4s
      t=22s  -> repeat
    The CONSTRAINT label always renders red, sitting above the active station. */
@@ -124,34 +127,32 @@ type SlotKind =
   | { type: "station"; id: number; label: string }
   | { type: "output" };
 
-// 19 slots laid out left -> right. Indices are stable.
-const SLOTS: SlotKind[] = [
-  { type: "input" },                                // 0
-  { type: "input" },                                // 1
-  { type: "station", id: 1, label: "01" },          // 2  STA 01
-  { type: "buffer" },                               // 3
-  { type: "station", id: 2, label: "02" },          // 4  STA 02
-  { type: "buffer" },                               // 5
-  { type: "buffer" },                               // 6
-  { type: "buffer" },                               // 7
-  { type: "buffer" },                               // 8
-  { type: "buffer" },                               // 9
-  { type: "station", id: 5, label: "05" },          // 10 STA 05  (constraint anchor)
-  { type: "buffer" },                               // 11
-  { type: "station", id: 6, label: "06" },          // 12 STA 06
-  { type: "buffer" },                               // 13
-  { type: "station", id: 7, label: "07" },          // 14 STA 07
-  { type: "buffer" },                               // 15
-  { type: "station", id: 8, label: "08" },          // 16 STA 08
-  { type: "output" },                               // 17
-  { type: "output" },                               // 18
-];
+// Build the slot grid programmatically: uniform 4-slot gap between stations,
+// 3-slot input runway at the start, 3-slot output runway at the end.
+function buildSlots(): SlotKind[] {
+  const out: SlotKind[] = [];
+  // Beginning invisible stops
+  for (let i = 0; i < 3; i++) out.push({ type: "input" });
+  // 7 stations with 4 buffers between each pair
+  for (let s = 1; s <= 7; s++) {
+    out.push({ type: "station", id: s, label: s.toString().padStart(2, "0") });
+    if (s < 7) {
+      for (let b = 0; b < 4; b++) out.push({ type: "buffer" });
+    }
+  }
+  // End invisible stops
+  for (let i = 0; i < 3; i++) out.push({ type: "output" });
+  return out;
+}
+
+const SLOTS: SlotKind[] = buildSlots();
 
 // Tick = 100ms. Cycle times are in ticks.
 const TICK_MS = 100;
 const HEALTHY_CYCLE = 12;     // 1.2s — stations release this often when healthy
 const SLOW_CYCLE = 35;        // 3.5s — slow cycle
 const INPUT_PERIOD = 12;      // spawn a new dot at slot 0 every 12 ticks
+const RELEASE_DELAY = 1;      // 0.1s — a slot can't be re-occupied the same tick it was vacated
 const PHASE_TICKS = {
   sta05_slow: 100,            // 10s
   sta07_down: 80,             // 8s
@@ -171,6 +172,12 @@ function FlowVisual({ className = "" }: { className?: string }) {
   const slotsRef = useRef<(number | null)[]>(Array(SLOTS.length).fill(null));
   // Per-station last-release tick — gates cycle time.
   const lastReleaseRef = useRef<Record<number, number>>({});
+  // Per-slot tick when the slot was last vacated. Enforces the 0.1s pallet
+  // release delay so dots cascade instead of all moving on the same tick.
+  // Initialized to -RELEASE_DELAY so empty slots are immediately available.
+  const lastVacatedRef = useRef<number[]>(
+    Array(SLOTS.length).fill(-RELEASE_DELAY)
+  );
   const lastSpawnRef = useRef(-INPUT_PERIOD);
   const nextIdRef = useRef(1);
 
@@ -231,7 +238,10 @@ function FlowVisual({ className = "" }: { className?: string }) {
       }
 
       // 2. Move dots — iterate from output side back to input so we don't double-move.
+      //    A dot at slot i can move to i+1 only if i+1 is empty AND has been
+      //    empty for at least RELEASE_DELAY ticks (cascade behavior).
       const sl = slotsRef.current.slice();
+      const vac = lastVacatedRef.current;
       for (let i = sl.length - 1; i >= 0; i--) {
         const dot = sl[i];
         if (dot === null) continue;
@@ -239,14 +249,18 @@ function FlowVisual({ className = "" }: { className?: string }) {
 
         // Output — dots disappear once they reach the final slot and tick once.
         if (slotKind.type === "output" && i === sl.length - 1) {
-          // age-out: clear after one tick at the final slot
           sl[i] = null;
+          vac[i] = t;
           continue;
         }
 
         const nextIdx = i + 1;
         if (nextIdx >= sl.length) continue;
         if (sl[nextIdx] !== null) continue; // blocked
+        // Pallet release delay: even if next slot is empty, wait until at
+        // least RELEASE_DELAY ticks after it was vacated. This is what makes
+        // a queue cascade forward instead of jumping in lockstep.
+        if (t - vac[nextIdx] < RELEASE_DELAY) continue;
 
         // If this slot is a station, it gates by cycle time.
         if (slotKind.type === "station") {
@@ -261,15 +275,22 @@ function FlowVisual({ className = "" }: { className?: string }) {
         // Move
         sl[nextIdx] = dot;
         sl[i] = null;
+        vac[i] = t;
       }
 
-      // 3. Spawn new dots at slot 0 if it's empty and enough ticks have passed.
-      if (sl[0] === null && t - lastSpawnRef.current >= INPUT_PERIOD) {
+      // 3. Spawn new dots at slot 0 if it's empty (and respects release delay)
+      //    and enough ticks have passed since the last spawn.
+      if (
+        sl[0] === null &&
+        t - vac[0] >= RELEASE_DELAY &&
+        t - lastSpawnRef.current >= INPUT_PERIOD
+      ) {
         sl[0] = nextIdRef.current++;
         lastSpawnRef.current = t;
       }
 
       slotsRef.current = sl;
+      lastVacatedRef.current = vac;
       setSlots(sl);
       tickRef.current = t + 1;
     };
@@ -280,10 +301,13 @@ function FlowVisual({ className = "" }: { className?: string }) {
     };
   }, [running, reduced]);
 
-  // Layout geometry — viewBox is 800x320; slot pitch = 38px, baseline y = 170.
-  const SLOT_PITCH = 38;
-  const X0 = 30; // left padding
+  // Layout geometry — viewBox sized to fit 34 slots cleanly.
+  const SLOT_PITCH = 24;
+  const X0 = 30;
   const Y_LINE = 170;
+  const VB_W = X0 * 2 + SLOTS.length * SLOT_PITCH; // 30 + 34*24 + 30 = 876
+  const VB_H = 320;
+  const SLOT_CELL_H = 18; // height of the slot-cell box around the conveyor
   const slotX = (i: number) => X0 + i * SLOT_PITCH + SLOT_PITCH / 2;
 
   return (
@@ -294,7 +318,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
       aria-label="Animated production line simulation showing dots flowing through stations with a constraint event"
     >
       <svg
-        viewBox="0 0 800 320"
+        viewBox={`0 0 ${VB_W} ${VB_H}`}
         className="w-full h-auto block"
         xmlns="http://www.w3.org/2000/svg"
         role="img"
@@ -321,47 +345,63 @@ function FlowVisual({ className = "" }: { className?: string }) {
         </defs>
 
         {/* Soft background glow */}
-        <ellipse cx="400" cy="170" rx="360" ry="80" fill="url(#flowGlow)" />
+        <ellipse cx={VB_W / 2} cy={Y_LINE} rx={VB_W * 0.45} ry="80" fill="url(#flowGlow)" />
 
-        {/* Floor grid */}
-        <g stroke="rgba(255,255,255,0.04)" strokeWidth="1">
-          <line x1="0" y1="240" x2="800" y2="240" />
-          <line x1="0" y1="270" x2="800" y2="270" />
-          <line x1="0" y1="300" x2="800" y2="300" />
+        {/* Slot grid — a row of subtle outlined cells along the conveyor.
+            Makes the discrete "invisible stops" between stations visible. */}
+        <g>
+          {/* Outer continuous frame around the whole slot row */}
+          <rect
+            x={X0}
+            y={Y_LINE - SLOT_CELL_H / 2}
+            width={SLOTS.length * SLOT_PITCH}
+            height={SLOT_CELL_H}
+            fill="rgba(255,255,255,0.02)"
+            stroke="rgba(255,255,255,0.18)"
+            strokeWidth="1"
+          />
+          {/* Vertical separators between every slot */}
+          {Array.from({ length: SLOTS.length - 1 }, (_, i) => i + 1).map((i) => (
+            <line
+              key={`grid-${i}`}
+              x1={X0 + i * SLOT_PITCH}
+              y1={Y_LINE - SLOT_CELL_H / 2}
+              x2={X0 + i * SLOT_PITCH}
+              y2={Y_LINE + SLOT_CELL_H / 2}
+              stroke="rgba(255,255,255,0.10)"
+              strokeWidth="1"
+            />
+          ))}
         </g>
 
-        {/* Conveyor path */}
+        {/* Conveyor path glow underneath the grid */}
         <line
           x1={X0}
           y1={Y_LINE}
           x2={X0 + SLOTS.length * SLOT_PITCH}
           y2={Y_LINE}
-          stroke="url(#flowConveyor)"
-          strokeWidth="2"
-        />
-        <line
-          x1={X0}
-          y1={Y_LINE}
-          x2={X0 + SLOTS.length * SLOT_PITCH}
-          y2={Y_LINE}
-          stroke="rgba(75, 225, 226, 0.12)"
+          stroke="rgba(75, 225, 226, 0.10)"
           strokeWidth="6"
           filter="url(#flowSoftBlur)"
         />
 
-        {/* Stations — render boxes below baseline; label below box. */}
+        {/* Stations — the station's slot in the grid is highlighted, and a
+            machine "box" hangs below the conveyor. Label below the box. */}
         {SLOTS.map((slot, i) => {
           if (slot.type !== "station") return null;
           const cx = slotX(i);
           const kind = stationStateAt(slot.id, phase);
-          const boxW = 32;
-          const boxH = 36;
+          const boxW = 38;
+          const boxH = 50;
           const boxX = cx - boxW / 2;
-          const boxY = Y_LINE - boxH / 2;
+          // Box hangs below the conveyor with a small gap.
+          const boxY = Y_LINE + SLOT_CELL_H / 2 + 8;
 
           // Base healthy treatment
-          let stroke = "rgba(255,255,255,0.18)";
+          let stroke = "rgba(255,255,255,0.20)";
           let fill = "rgba(255,255,255,0.03)";
+          let cellStroke: string | null = null;
+          let cellFill: string | null = null;
           let textInside: string | null = null;
           let textColor = "#fff";
           let strokeWidth = 1;
@@ -369,6 +409,8 @@ function FlowVisual({ className = "" }: { className?: string }) {
           if (kind === "slow") {
             stroke = "#F5C518";
             fill = "rgba(245, 197, 24, 0.18)";
+            cellStroke = "#F5C518";
+            cellFill = "rgba(245, 197, 24, 0.18)";
             textInside = "SLOW CYCLE";
             textColor = "#F5C518";
             strokeWidth = 2;
@@ -376,6 +418,8 @@ function FlowVisual({ className = "" }: { className?: string }) {
           } else if (kind === "down") {
             stroke = "#E54B4B";
             fill = "rgba(229, 75, 75, 0.22)";
+            cellStroke = "#E54B4B";
+            cellFill = "rgba(229, 75, 75, 0.22)";
             textInside = "DOWN";
             textColor = "#E54B4B";
             strokeWidth = 2;
@@ -383,28 +427,41 @@ function FlowVisual({ className = "" }: { className?: string }) {
 
           return (
             <g key={`sta-${slot.id}`}>
-              {/* CONSTRAINT label — only on the active constrained station */}
+              {/* When constrained, recolor the conveyor slot-cell itself */}
+              {cellStroke && cellFill && (
+                <rect
+                  x={cx - SLOT_PITCH / 2}
+                  y={Y_LINE - SLOT_CELL_H / 2}
+                  width={SLOT_PITCH}
+                  height={SLOT_CELL_H}
+                  fill={cellFill}
+                  stroke={cellStroke}
+                  strokeWidth="1.5"
+                />
+              )}
+              {/* CONSTRAINT label — only on the active constrained station,
+                  positioned above the conveyor cell */}
               {kind !== "healthy" && (
                 <text
                   x={cx}
-                  y={Y_LINE - boxH / 2 - 12}
+                  y={Y_LINE - SLOT_CELL_H / 2 - 8}
                   fill="#E54B4B"
-                  fontSize="9"
+                  fontSize="8"
                   fontFamily="ui-monospace, monospace"
                   textAnchor="middle"
-                  letterSpacing="1.5"
-                  fontWeight="600"
+                  letterSpacing="1.4"
+                  fontWeight="700"
                 >
                   CONSTRAINT
                 </text>
               )}
-              {/* Box */}
+              {/* Machine box below conveyor */}
               <rect
                 x={boxX}
                 y={boxY}
                 width={boxW}
                 height={boxH}
-                rx="3"
+                rx="4"
                 fill={fill}
                 stroke={stroke}
                 strokeWidth={strokeWidth}
@@ -413,9 +470,9 @@ function FlowVisual({ className = "" }: { className?: string }) {
               {textInside && !twoLine && (
                 <text
                   x={cx}
-                  y={Y_LINE + 3}
+                  y={boxY + boxH / 2 + 3}
                   fill={textColor}
-                  fontSize="7.5"
+                  fontSize="8"
                   fontFamily="ui-monospace, monospace"
                   textAnchor="middle"
                   letterSpacing="1"
@@ -428,9 +485,9 @@ function FlowVisual({ className = "" }: { className?: string }) {
                 <>
                   <text
                     x={cx}
-                    y={Y_LINE - 1}
+                    y={boxY + boxH / 2 - 2}
                     fill={textColor}
-                    fontSize="7"
+                    fontSize="7.5"
                     fontFamily="ui-monospace, monospace"
                     textAnchor="middle"
                     letterSpacing="0.5"
@@ -440,9 +497,9 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   </text>
                   <text
                     x={cx}
-                    y={Y_LINE + 8}
+                    y={boxY + boxH / 2 + 8}
                     fill={textColor}
-                    fontSize="7"
+                    fontSize="7.5"
                     fontFamily="ui-monospace, monospace"
                     textAnchor="middle"
                     letterSpacing="0.5"
@@ -452,29 +509,18 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   </text>
                 </>
               )}
-              {/* Station label below box: STA / 05 stacked */}
+              {/* Station label below box: just "L05" — matches reference image */}
               <text
                 x={cx}
-                y={Y_LINE + boxH / 2 + 14}
-                fill="rgba(255,255,255,0.45)"
-                fontSize="7.5"
+                y={boxY + boxH + 14}
+                fill="rgba(255,255,255,0.55)"
+                fontSize="9"
                 fontFamily="ui-monospace, monospace"
                 textAnchor="middle"
                 letterSpacing="1.5"
+                fontWeight="500"
               >
-                STA
-              </text>
-              <text
-                x={cx}
-                y={Y_LINE + boxH / 2 + 24}
-                fill="rgba(255,255,255,0.65)"
-                fontSize="8.5"
-                fontFamily="ui-monospace, monospace"
-                textAnchor="middle"
-                letterSpacing="1.5"
-                fontWeight="600"
-              >
-                {slot.label}
+                L{slot.label}
               </text>
             </g>
           );
@@ -500,7 +546,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
               style={{ transition: `transform ${TICK_MS}ms linear, opacity 200ms ease` }}
               opacity={opacity}
             >
-              <circle cx="0" cy="0" r="4" fill="url(#flowBuild)" />
+              <circle cx="0" cy="0" r="3.5" fill="url(#flowBuild)" />
             </g>
           );
         })}
