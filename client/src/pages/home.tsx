@@ -7,6 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import { insertDemoRequestSchema, type InsertDemoRequest } from "@shared/schema";
 
 import LogoWhiteSvgUrl from "@assets/Logo-White-Text.svg";
+import IconSvgUrl from "@assets/Icon.svg";
 import DashboardImg from "@assets/Dashboard1.jpg";
 
 import {
@@ -165,22 +166,31 @@ const BLOCK_RANGE_END = 32; // inclusive
 // Tick = 100ms. Cycle times are in ticks.
 const TICK_MS = 100;
 const HEALTHY_CYCLE = 12;     // 1.2s — stations release this often when healthy
-const SLOW_CYCLE = 35;        // 3.5s — slow cycle
+const SLOW_CYCLE = 17;        // 1.7s — slow cycle (2× faster output than the old 3.5s
+                              //          so STA 05 can fill the buffer before STA 07 recovers)
 const INPUT_PERIOD = 12;      // spawn a new dot at slot 0 every 12 ticks
 const RELEASE_DELAY = 1;      // 0.1s — a slot can't be re-occupied the same tick it was vacated
 const MIN_DWELL = 5;          // 0.5s — minimum time a part dwells at a station before release
 
-// Phase durations (in ticks). The pre-block phase is open-ended: it ends
-// either when the block is detected OR after PRE_BLOCK_MAX as a safety cap.
-// Total STA 07 down time targets ~16s (2× the previous 8s).
+// Phase durations (in ticks). The pre-block phase ends when the block is
+// detected OR after PRE_BLOCK_MAX as a safety cap. STA 07 total down time is
+// now ~24s (1.5× of the previous 16s) so the buffer reliably clogs in time.
+// The recover_linger phase is now event-driven — it ends when 2 buffer slots
+// downstream of STA 05 (slots 24 and 25) are vacant — with a safety cap.
 const PHASE_TICKS = {
   sta05_slow_only: 100,        // 10s — STA 05 slow + constraint, before STA 07 fails
-  sta07_down_pre_block_max: 60, // 6s safety cap; usually ends earlier on block
-  sta07_down_post_block: 100,  // 10s — block detected, constraint shifts to STA 07
+  sta07_down_pre_block_max: 100, // 10s safety cap; typically ends earlier on detected block
+  sta07_down_post_block: 150,  // 15s — block detected, constraint shifts to STA 07
+                                //        (with ~9s pre-block this hits the ~24s target)
   sta07_recover_green: 10,     // 1.0s green flash
-  sta07_recover_linger: 30,    // 3.0s constraint lingers on STA 07
-  gap: 30,                     // 3s healthy gap, also when the bar chart resets
+  sta07_recover_linger_max: 80, // 8s safety cap; ends when buffer drains 2 slots
+  gap: 30,                     // 3s healthy gap, then bar chart resets
 };
+
+// Slots immediately downstream of STA 05. When BOTH are vacant after recovery,
+// the CONSTRAINT label moves back to STA 05.
+const POST_STA05_SLOT_A = 24;
+const POST_STA05_SLOT_B = 25;
 
 function FlowVisual({ className = "" }: { className?: string }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -193,6 +203,9 @@ function FlowVisual({ className = "" }: { className?: string }) {
   const phaseStartRef = useRef(0);
   // Where the CONSTRAINT label sits — decoupled from station visual state.
   const constraintAtRef = useRef<5 | 7 | null>(5);
+  // Tick when CONSTRAINT moved back to STA 05 during linger (null if hasn't yet).
+  // Used to time the brief "CONSTRAINT-back-on-05" window before entering gap.
+  const constraintBackTickRef = useRef<number | null>(null);
   // Slots store dot IDs (number) or null if empty.
   const slotsRef = useRef<(number | null)[]>(Array(SLOTS.length).fill(null));
   // Per-station last-release tick — gates cycle time.
@@ -309,11 +322,15 @@ function FlowVisual({ className = "" }: { className?: string }) {
         phaseElapsed >= PHASE_TICKS.sta07_recover_green
       ) {
         nextPhase = "sta07_recover_linger";
-      } else if (
-        currentPhase === "sta07_recover_linger" &&
-        phaseElapsed >= PHASE_TICKS.sta07_recover_linger
-      ) {
-        nextPhase = "gap";
+      } else if (currentPhase === "sta07_recover_linger") {
+        // Linger ends when CONSTRAINT has already moved back to STA 05 AND
+        // we've shown that for ~2s, OR after a safety cap.
+        const movedBackTick = constraintBackTickRef.current;
+        if (movedBackTick !== null && t - movedBackTick >= 20) {
+          nextPhase = "gap";
+        } else if (phaseElapsed >= PHASE_TICKS.sta07_recover_linger_max) {
+          nextPhase = "gap";
+        }
       } else if (currentPhase === "gap" && phaseElapsed >= PHASE_TICKS.gap) {
         nextPhase = "sta05_slow_only";
       }
@@ -327,18 +344,18 @@ function FlowVisual({ className = "" }: { className?: string }) {
         let nextConstraint: 5 | 7 | null = constraintAtRef.current;
         if (nextPhase === "sta05_slow_only") {
           nextConstraint = 5;
-          // Hard reset losses bar at the start of a new cycle.
+          // Hard reset losses bar and the "moved back" timer at start of cycle.
           lossesRef.current = { s5: 0, s7: 0 };
           setLosses({ s5: 0, s7: 0 });
+          constraintBackTickRef.current = null;
         } else if (nextPhase === "sta07_down_pre_block") {
           nextConstraint = 5; // stays on STA 05 until block detected
         } else if (nextPhase === "sta07_down_post_block") {
           nextConstraint = 7; // shifts on block
-        } else if (
-          nextPhase === "sta07_recover_green" ||
-          nextPhase === "sta07_recover_linger"
-        ) {
-          nextConstraint = 7; // stays on STA 07 through recovery + linger
+        } else if (nextPhase === "sta07_recover_green") {
+          nextConstraint = 7; // stays on STA 07 through green flash
+        } else if (nextPhase === "sta07_recover_linger") {
+          nextConstraint = 7; // starts on STA 07 — may move back to 5 mid-phase
         } else if (nextPhase === "gap") {
           nextConstraint = null;
         }
@@ -346,6 +363,20 @@ function FlowVisual({ className = "" }: { className?: string }) {
           constraintAtRef.current = nextConstraint;
           setConstraintAt(nextConstraint);
         }
+      }
+
+      // 1b. During linger, watch for buffer drain: once both slots immediately
+      // downstream of STA 05 are vacant, the CONSTRAINT label moves back to
+      // STA 05 (because that's the real bottleneck again now that STA 07 is healthy).
+      if (
+        phaseRef.current === "sta07_recover_linger" &&
+        constraintAtRef.current === 7 &&
+        slotsRef.current[POST_STA05_SLOT_A] === null &&
+        slotsRef.current[POST_STA05_SLOT_B] === null
+      ) {
+        constraintAtRef.current = 5;
+        setConstraintAt(5);
+        constraintBackTickRef.current = t;
       }
 
       // 2. Accumulate losses every tick the constraint sits on a station.
@@ -430,22 +461,24 @@ function FlowVisual({ className = "" }: { className?: string }) {
   // ---- Layout geometry ----
   const SLOT_PITCH = 24;
   const X0 = 30;
-  const Y_LINE = 230; // shifted down to make room for the bar chart above
+  // Increased vertical space: big LOSSES title, bar chart, line, big PRODUCTION LINE title.
+  const CHART_TITLE_Y = 26;        // big "LOSSES THIS CYCLE" title
+  const CHART_Y = 50;              // top of chart frame
+  const CHART_H = 130;             // taller chart so bars are readable
+  const Y_LINE = CHART_Y + CHART_H + 70;  // ~250 — leaves room for chart + station hint
+  const SLOT_CELL_H = 22;          // taller slot grid
   const VB_W = X0 * 2 + SLOTS.length * SLOT_PITCH; // 30 + 37*24 + 30 = 948
-  const VB_H = 380;
-  const SLOT_CELL_H = 18;
+  const VB_H = Y_LINE + 170;       // leaves room for taller boxes, labels, big title below
   const slotX = (i: number) => X0 + i * SLOT_PITCH + SLOT_PITCH / 2;
 
-  // Bar chart layout — sits at top of SVG, above the line.
+  // Bar chart layout — spans the full width so bars can sit directly above
+  // their corresponding stations.
   const CHART_X = X0;
-  const CHART_Y = 20;
   const CHART_W = SLOTS.length * SLOT_PITCH;
-  const CHART_H = 90;
-  // Max scale: pick a sensible ceiling (e.g., 15s worth of ticks at 1 tick each)
-  // so bars don't overflow visually. Anything beyond clamps.
-  const LOSS_MAX = 150; // 15s
+  // Max scale clamps bars; ~24s worth of ticks at the longest plausible run.
+  const LOSS_MAX = 240;
   const lossScale = (v: number) =>
-    (Math.min(v, LOSS_MAX) / LOSS_MAX) * (CHART_H - 18);
+    (Math.min(v, LOSS_MAX) / LOSS_MAX) * (CHART_H - 30);
 
   // Recover-green color
   const GREEN_STROKE = "#22C55E";
@@ -487,17 +520,18 @@ function FlowVisual({ className = "" }: { className?: string }) {
 
         {/* ============ Losses bar chart (above the line) ============ */}
         <g>
-          {/* Chart title */}
+          {/* Big chart title */}
           <text
-            x={CHART_X}
-            y={CHART_Y - 4}
-            fill="rgba(255,255,255,0.55)"
-            fontSize="10"
+            x={VB_W / 2}
+            y={CHART_TITLE_Y}
+            fill="rgba(255,255,255,0.92)"
+            fontSize="18"
             fontFamily="ui-monospace, monospace"
-            letterSpacing="1.4"
-            fontWeight="600"
+            textAnchor="middle"
+            letterSpacing="3"
+            fontWeight="700"
           >
-            LOSSES (this cycle)
+            LOSSES THIS CYCLE
           </text>
           {/* Chart frame */}
           <rect
@@ -510,91 +544,101 @@ function FlowVisual({ className = "" }: { className?: string }) {
             strokeWidth="1"
             rx="3"
           />
-          {/* Baseline */}
-          <line
-            x1={CHART_X + 60}
-            y1={CHART_Y + CHART_H - 14}
-            x2={CHART_X + CHART_W - 12}
-            y2={CHART_Y + CHART_H - 14}
-            stroke="rgba(255,255,255,0.18)"
-            strokeWidth="1"
-          />
-          {/* Two bars side-by-side */}
+          {/* Baseline aligned along the bottom of the chart */}
           {(() => {
-            const baseline = CHART_Y + CHART_H - 14;
-            const barW = 28;
-            const groupX = CHART_X + 90;
-            const gap = 24;
+            const baseline = CHART_Y + CHART_H - 18;
+            const barW = SLOT_PITCH * 1.6; // wider — ~38px, more readable
+            // Find STA 05 and STA 07 slot indices.
+            const sta05Idx = SLOTS.findIndex(
+              (s) => s.type === "station" && s.id === 5
+            );
+            const sta07Idx = SLOTS.findIndex(
+              (s) => s.type === "station" && s.id === 7
+            );
+            const s5cx = slotX(sta05Idx);
+            const s7cx = slotX(sta07Idx);
             const s5H = lossScale(losses.s5);
             const s7H = lossScale(losses.s7);
             return (
               <>
-                {/* STA 05 bar */}
+                {/* Baseline rule */}
+                <line
+                  x1={CHART_X + 8}
+                  y1={baseline}
+                  x2={CHART_X + CHART_W - 8}
+                  y2={baseline}
+                  stroke="rgba(255,255,255,0.18)"
+                  strokeWidth="1"
+                />
+
+                {/* STA 05 bar — directly above STA 05 station */}
                 <rect
-                  x={groupX}
+                  x={s5cx - barW / 2}
                   y={baseline - s5H}
                   width={barW}
                   height={s5H}
                   fill="rgba(245, 197, 24, 0.30)"
                   stroke="#F5C518"
                   strokeWidth="1.5"
-                  style={{ transition: `y ${TICK_MS}ms linear, height ${TICK_MS}ms linear` }}
+                  style={{
+                    transition: `y ${TICK_MS}ms linear, height ${TICK_MS}ms linear`,
+                  }}
                 />
-                <text
-                  x={groupX + barW / 2}
-                  y={baseline + 10}
-                  fill="rgba(255,255,255,0.55)"
-                  fontSize="9"
-                  fontFamily="ui-monospace, monospace"
-                  textAnchor="middle"
-                  letterSpacing="1"
-                  fontWeight="600"
-                >
-                  STA 05
-                </text>
-                {/* STA 07 bar */}
+                {/* STA 05 value label on top of bar (when bar is tall enough) */}
+                {s5H > 18 && (
+                  <text
+                    x={s5cx}
+                    y={baseline - s5H + 12}
+                    fill="#F5C518"
+                    fontSize="11"
+                    fontFamily="ui-monospace, monospace"
+                    textAnchor="middle"
+                    letterSpacing="0.6"
+                    fontWeight="700"
+                  >
+                    {(losses.s5 / 10).toFixed(1)}s
+                  </text>
+                )}
+
+                {/* STA 07 bar — directly above STA 07 station */}
                 <rect
-                  x={groupX + barW + gap}
+                  x={s7cx - barW / 2}
                   y={baseline - s7H}
                   width={barW}
                   height={s7H}
                   fill="rgba(229, 75, 75, 0.30)"
                   stroke="#E54B4B"
                   strokeWidth="1.5"
-                  style={{ transition: `y ${TICK_MS}ms linear, height ${TICK_MS}ms linear` }}
+                  style={{
+                    transition: `y ${TICK_MS}ms linear, height ${TICK_MS}ms linear`,
+                  }}
                 />
+                {s7H > 18 && (
+                  <text
+                    x={s7cx}
+                    y={baseline - s7H + 12}
+                    fill="#E54B4B"
+                    fontSize="11"
+                    fontFamily="ui-monospace, monospace"
+                    textAnchor="middle"
+                    letterSpacing="0.6"
+                    fontWeight="700"
+                  >
+                    {(losses.s7 / 10).toFixed(1)}s
+                  </text>
+                )}
+
+                {/* Y-axis caption (top-left) */}
                 <text
-                  x={groupX + barW + gap + barW / 2}
-                  y={baseline + 10}
-                  fill="rgba(255,255,255,0.55)"
-                  fontSize="9"
+                  x={CHART_X + 10}
+                  y={CHART_Y + 18}
+                  fill="rgba(255,255,255,0.50)"
+                  fontSize="10"
                   fontFamily="ui-monospace, monospace"
-                  textAnchor="middle"
-                  letterSpacing="1"
+                  letterSpacing="1.2"
                   fontWeight="600"
                 >
-                  STA 07
-                </text>
-                {/* Y-axis hint label */}
-                <text
-                  x={CHART_X + 8}
-                  y={CHART_Y + 14}
-                  fill="rgba(255,255,255,0.40)"
-                  fontSize="8"
-                  fontFamily="ui-monospace, monospace"
-                  letterSpacing="0.8"
-                >
-                  TIME ON
-                </text>
-                <text
-                  x={CHART_X + 8}
-                  y={CHART_Y + 24}
-                  fill="rgba(255,255,255,0.40)"
-                  fontSize="8"
-                  fontFamily="ui-monospace, monospace"
-                  letterSpacing="0.8"
-                >
-                  CONSTRAINT
+                  TIME ON CONSTRAINT (s)
                 </text>
               </>
             );
@@ -653,10 +697,10 @@ function FlowVisual({ className = "" }: { className?: string }) {
           const cx = slotX(i);
           const kind = stationStateAt(slot.id, phase);
           const isConstrained = constraintAt === slot.id;
-          const boxW = 38;
-          const boxH = 50;
+          const boxW = 56;
+          const boxH = 64;
           const boxX = cx - boxW / 2;
-          const boxY = Y_LINE + SLOT_CELL_H / 2 + 8;
+          const boxY = Y_LINE + SLOT_CELL_H / 2 + 12;
 
           // Base healthy treatment
           let stroke = "rgba(255,255,255,0.20)";
@@ -711,12 +755,12 @@ function FlowVisual({ className = "" }: { className?: string }) {
               {isConstrained && (
                 <text
                   x={cx}
-                  y={Y_LINE - SLOT_CELL_H / 2 - 8}
+                  y={Y_LINE - SLOT_CELL_H / 2 - 10}
                   fill="#E54B4B"
-                  fontSize="9"
+                  fontSize="12"
                   fontFamily="ui-monospace, monospace"
                   textAnchor="middle"
-                  letterSpacing="1.6"
+                  letterSpacing="2"
                   fontWeight="700"
                 >
                   CONSTRAINT
@@ -733,16 +777,16 @@ function FlowVisual({ className = "" }: { className?: string }) {
                 stroke={stroke}
                 strokeWidth={strokeWidth}
               />
-              {/* Inside text — bigger now (10/9.5 vs old 8/7.5) */}
+              {/* Inside text — single label fills the box */}
               {textInside && !twoLine && (
                 <text
                   x={cx}
-                  y={boxY + boxH / 2 + 4}
+                  y={boxY + boxH / 2 + 5}
                   fill={textColor}
-                  fontSize="10"
+                  fontSize="13"
                   fontFamily="ui-monospace, monospace"
                   textAnchor="middle"
-                  letterSpacing="1.2"
+                  letterSpacing="1.6"
                   fontWeight="700"
                 >
                   {textInside}
@@ -752,39 +796,39 @@ function FlowVisual({ className = "" }: { className?: string }) {
                 <>
                   <text
                     x={cx}
-                    y={boxY + boxH / 2 - 2}
+                    y={boxY + boxH / 2 - 4}
                     fill={textColor}
-                    fontSize="9.5"
+                    fontSize="13"
                     fontFamily="ui-monospace, monospace"
                     textAnchor="middle"
-                    letterSpacing="0.6"
+                    letterSpacing="1"
                     fontWeight="700"
                   >
                     SLOW
                   </text>
                   <text
                     x={cx}
-                    y={boxY + boxH / 2 + 10}
+                    y={boxY + boxH / 2 + 14}
                     fill={textColor}
-                    fontSize="9.5"
+                    fontSize="13"
                     fontFamily="ui-monospace, monospace"
                     textAnchor="middle"
-                    letterSpacing="0.6"
+                    letterSpacing="1"
                     fontWeight="700"
                   >
                     CYCLE
                   </text>
                 </>
               )}
-              {/* Station label below box: "STA 01" — bigger */}
+              {/* Station label below box: "STA 01" */}
               <text
                 x={cx}
-                y={boxY + boxH + 16}
-                fill="rgba(255,255,255,0.65)"
-                fontSize="11"
+                y={boxY + boxH + 18}
+                fill="rgba(255,255,255,0.75)"
+                fontSize="13"
                 fontFamily="ui-monospace, monospace"
                 textAnchor="middle"
-                letterSpacing="1.6"
+                letterSpacing="2"
                 fontWeight="600"
               >
                 STA {slot.label}
@@ -812,10 +856,24 @@ function FlowVisual({ className = "" }: { className?: string }) {
               }}
               opacity={opacity}
             >
-              <circle cx="0" cy="0" r="3.5" fill="url(#flowBuild)" />
+              <circle cx="0" cy="0" r="4.5" fill="url(#flowBuild)" />
             </g>
           );
         })}
+
+        {/* Big title BELOW the line diagram */}
+        <text
+          x={VB_W / 2}
+          y={VB_H - 20}
+          fill="rgba(255,255,255,0.92)"
+          fontSize="18"
+          fontFamily="ui-monospace, monospace"
+          textAnchor="middle"
+          letterSpacing="3"
+          fontWeight="700"
+        >
+          PRODUCTION LINE — LINE 1
+        </text>
       </svg>
     </div>
   );
@@ -926,11 +984,11 @@ function Hero() {
             Built for discrete manufacturing
           </div>
 
-          <h1 className="text-[2.5rem] leading-[1.1] sm:text-5xl sm:leading-[1.05] lg:text-7xl lg:leading-[1.02] font-semibold tracking-tight text-white">
-            See where your line is{" "}
-            <span className="fs-gradient-text">losing builds.</span>
-            {" "}
-            <span className="text-white/60 block sm:inline">Then act on it.</span>
+          {/* Force three rows on every viewport — matches iOS hero rhythm */}
+          <h1 className="text-[2.5rem] leading-[1.08] sm:text-5xl sm:leading-[1.05] lg:text-7xl lg:leading-[1.02] font-semibold tracking-tight text-white">
+            <span className="block">See where your line</span>
+            <span className="fs-gradient-text block">is losing builds.</span>
+            <span className="text-white/60 block">Then act on it.</span>
           </h1>
 
           <p className="mt-6 text-lg lg:text-xl text-white/65 max-w-2xl mx-auto leading-relaxed">
@@ -1152,6 +1210,13 @@ function BuiltBy() {
       ref={ref}
     >
       <div className="absolute inset-0 fs-radial-glow opacity-60 pointer-events-none" />
+      {/* Subtle icon watermark — faint, large, anchored bottom-right */}
+      <img
+        src={IconSvgUrl}
+        alt=""
+        aria-hidden="true"
+        className="pointer-events-none select-none absolute -right-16 -bottom-16 w-[420px] lg:w-[560px] opacity-[0.04]"
+      />
       <div className="relative max-w-7xl mx-auto px-6 lg:px-8">
         <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
           <div className={`min-w-0 ${shown ? "fs-fade-up" : "opacity-0"}`}>
