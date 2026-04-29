@@ -108,30 +108,29 @@ function BrowserFrame({
    slot grid: 3 input + 4 between every station pair + 3 output (37 slots total).
    Dots advance one slot per tick if the next slot is empty AND has been
    empty for at least RELEASE_DELAY ticks (cascade behavior). Stations also
-   gate by cycle time (healthy / slow / down) and now by MIN_DWELL so a part
+   gate by cycle time (healthy / slow / down) and by MIN_DWELL so a part
    never "flies by" a station.
 
-   Event timeline (loops):
-     1. sta05_slow_only        — STA 05 slow + CONSTRAINT on STA 05      (~10s)
-     2. sta07_down_pre_block   — STA 07 also DOWN, CONSTRAINT still on   (until
-                                  slots 24..32 are fully clogged, ~3-6s)
-     3. sta07_down_post_block  — CONSTRAINT moves to STA 07              (~10s)
-     4. sta07_recover_green    — STA 07 green flash, CONSTRAINT stays    (1.0s)
-     5. sta07_recover_linger   — STA 07 healthy, CONSTRAINT lingers      (3.0s)
-     6. gap                    — everything healthy, no CONSTRAINT       (~3s)
-     -> loop
-   Visual state of stations is decoupled from where the CONSTRAINT label is.
-   A losses bar chart above the line accumulates while the label sits on a
-   station and hard-resets at the start of phase 1. */
+   STRICT 5-STATE LOOP (round 7):
+     State 1 — STA 05 slow + CONSTRAINT on STA 05; bar accumulates s5.
+               Ends when s5 reaches 10 builds (100 ticks).
+     State 2 — STA 07 goes DOWN. CONSTRAINT stays on STA 05. s5 keeps
+               accumulating. Ends when the buffer (slots 24-32) is fully full.
+     State 3 — CONSTRAINT moves to STA 07; STA 05 shows BLOCKED. s7 accumulates,
+               s5 frozen. Ends when s7 reaches 12 builds (120 ticks).
+     State 4 — STA 07 turns GREEN with "UP" label. CONSTRAINT label gone.
+               STA 05 stays BLOCKED. No losses accumulate. Lasts exactly 1s.
+     State 5 — STA 05 switches from BLOCKED to CONSTRAINT (red). s5 accumulates
+               5 more builds (50 ticks), then loops back to State 1 (full reset).
+*/
 
 type StationKind = "healthy" | "slow" | "down" | "recover";
 type Phase =
-  | "sta05_slow_only"
-  | "sta07_down_pre_block"
-  | "sta07_down_post_block"
-  | "sta07_recover_green"
-  | "sta07_recover_linger"
-  | "gap";
+  | "s1_slow"
+  | "s2_down"
+  | "s3_blocked"
+  | "s4_up"
+  | "s5_constraint_back";
 
 // Slot kinds describe each position on the line.
 type SlotKind =
@@ -157,42 +156,30 @@ function buildSlots(): SlotKind[] {
 
 const SLOTS: SlotKind[] = buildSlots();
 
-// Slot indices that, when ALL occupied, indicate STA 05 is fully blocked
-// downstream (everything between STA 05's exit and STA 07's entrance is full).
-// Layout: STA05=23, buffers 24-27, STA06=28, buffers 29-32, STA07=33.
-const BLOCK_RANGE_START = 24;
-const BLOCK_RANGE_END = 32; // inclusive
+// Buffer between STA 05 (slot 23) and STA 07 (slot 33). Layout:
+// STA05=23, buffers 24-27, STA06=28, buffers 29-32, STA07=33.
+const BUFFER_05_07_START = 24;
+const BUFFER_05_07_END = 32; // inclusive — 9 slots total
+
+// Slot index of STA 05 (used for initial pre-fill: every slot 0..STA05_INDEX
+// inclusive starts with a part).
+const STA05_INDEX = 23;
 
 // Tick = 100ms. Cycle times are in ticks.
 const TICK_MS = 100;
 const HEALTHY_CYCLE = 12;     // 1.2s — stations release this often when healthy
-const SLOW_CYCLE = 17;        // 1.7s — slow cycle (2× faster output than the old 3.5s
-                              //          so STA 05 can fill the buffer before STA 07 recovers)
+const SLOW_CYCLE = 17;        // 1.7s — slow cycle
 const INPUT_PERIOD = 12;      // spawn a new dot at slot 0 every 12 ticks
 const RELEASE_DELAY = 1;      // 0.1s — a slot can't be re-occupied the same tick it was vacated
 const MIN_DWELL = 5;          // 0.5s — minimum time a part dwells at a station before release
 
-// Phase durations (in ticks). The pre-block phase ends when the block is
-// detected OR after PRE_BLOCK_MAX as a safety cap. STA 07 total down time is
-// now ~24s (1.5× of the previous 16s) so the buffer reliably clogs in time.
-// The recover_linger phase is now event-driven — it ends when 2 buffer slots
-// downstream of STA 05 (slots 24 and 25) are vacant — with a safety cap.
-const PHASE_TICKS = {
-  sta05_slow_only: 100,        // 10s — STA 05 slow + constraint, before STA 07 fails
-  sta07_down_pre_block_max: 100, // 10s safety cap; typically ends earlier on detected block
-  sta07_down_post_block: 150,  // 15s — block detected, constraint shifts to STA 07
-                                //        (with ~9s pre-block this hits the ~24s target)
-  sta07_recover_green: 10,     // 1.0s green flash
-  sta07_recover_linger_max: 80, // 8s safety cap; ends when buffer drains 2 slots
-  gap: 30,                     // 3s healthy gap, then bar chart resets
-};
-
-// Buffer between STA 05 and STA 07 (slots 24-32 inclusive, 9 slots total).
-// CONSTRAINT label is now FULLY EVENT-DRIVEN by this buffer:
-//   - Moves to STA 07 only when ALL 9 slots are occupied (true gridlock).
-//   - Returns to STA 05 the moment ANY one of the 9 slots becomes empty.
-const BUFFER_05_07_START = 24;
-const BUFFER_05_07_END = 32; // inclusive
+// State thresholds — losses are stored in ticks; 10 ticks = 1 build/second.
+// Bar chart displays Math.floor(losses / 10).
+const S1_END_TICKS = 100;        // State 1 ends at 10 builds on STA 05.
+const S3_END_TICKS = 120;        // State 3 ends at 12 builds on STA 07.
+const S4_DURATION_TICKS = 10;    // State 4 lasts exactly 1.0s.
+const S5_DURATION_TICKS = 50;    // State 5 adds 5 more builds at STA 05.
+const S2_SAFETY_CAP_TICKS = 200; // 20s safety cap if buffer never fills.
 
 function FlowVisual({ className = "" }: { className?: string }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -201,13 +188,10 @@ function FlowVisual({ className = "" }: { className?: string }) {
 
   // ---- Simulation state (refs, not React state) ----
   const tickRef = useRef(0);
-  const phaseRef = useRef<Phase>("sta05_slow_only");
+  const phaseRef = useRef<Phase>("s1_slow");
   const phaseStartRef = useRef(0);
   // Where the CONSTRAINT label sits — decoupled from station visual state.
   const constraintAtRef = useRef<5 | 7 | null>(5);
-  // Tick when CONSTRAINT moved back to STA 05 during linger (null if hasn't yet).
-  // Used to time the brief "CONSTRAINT-back-on-05" window before entering gap.
-  const constraintBackTickRef = useRef<number | null>(null);
   // Slots store dot IDs (number) or null if empty.
   const slotsRef = useRef<(number | null)[]>(Array(SLOTS.length).fill(null));
   // Per-station last-release tick — gates cycle time.
@@ -229,14 +213,15 @@ function FlowVisual({ className = "" }: { className?: string }) {
   const [slots, setSlots] = useState<(number | null)[]>(() =>
     Array(SLOTS.length).fill(null)
   );
-  const [phase, setPhase] = useState<Phase>("sta05_slow_only");
+  const [phase, setPhase] = useState<Phase>("s1_slow");
   const [constraintAt, setConstraintAt] = useState<5 | 7 | null>(5);
   const [losses, setLosses] = useState<{ s5: number; s7: number }>({
     s5: 0,
     s7: 0,
   });
 
-  // ---- One-time pre-fill: each station starts with a dot ----
+  // ---- One-time pre-fill: every slot from 0 through STA 05 (slot 23) starts
+  //      with a part (per round 7 spec). Slots downstream of STA 05 start empty.
   // useRef trick so we only run init once even with strict-mode double-mount.
   const initRef = useRef(false);
   if (!initRef.current) {
@@ -244,18 +229,18 @@ function FlowVisual({ className = "" }: { className?: string }) {
     const sl = slotsRef.current;
     const arrived = dotArrivedRef.current;
     let id = 1;
-    for (let i = 0; i < SLOTS.length; i++) {
-      if (SLOTS[i].type === "station") {
-        sl[i] = id++;
-        arrived[i] = 0;
-      }
+    for (let i = 0; i <= STA05_INDEX; i++) {
+      sl[i] = id++;
+      arrived[i] = 0;
     }
     nextIdRef.current = id;
-    // Allow stations to release as soon as cycle + MIN_DWELL elapses
-    // (their first release is ~0.5s in).
+    // Allow stations to release as soon as cycle + MIN_DWELL elapses.
     for (let s = 1; s <= 7; s++) {
       lastReleaseRef.current[s] = -HEALTHY_CYCLE;
     }
+    // Spawn timer: hold off briefly so the pre-filled line has a moment to
+    // settle visually before new parts come in.
+    lastSpawnRef.current = 0;
     // Sync render state
     setSlots(sl.slice());
   }
@@ -294,47 +279,41 @@ function FlowVisual({ className = "" }: { className?: string }) {
       const phaseElapsed = t - phaseStartRef.current;
       const currentPhase = phaseRef.current;
 
-      // 1. Phase transitions
+      // 1. Strict state machine — round 7 rules.
       let nextPhase: Phase | null = null;
-      if (
-        currentPhase === "sta05_slow_only" &&
-        phaseElapsed >= PHASE_TICKS.sta05_slow_only
-      ) {
-        nextPhase = "sta07_down_pre_block";
-      } else if (currentPhase === "sta07_down_pre_block") {
-        // End on detected block OR safety cap.
-        let blocked = true;
+      if (currentPhase === "s1_slow") {
+        // State 1 ends when STA 05 hits 10 builds lost.
+        if (lossesRef.current.s5 >= S1_END_TICKS) {
+          nextPhase = "s2_down";
+        }
+      } else if (currentPhase === "s2_down") {
+        // State 2 ends when buffer (24-32) is fully full.
+        let allFull = true;
         const sl0 = slotsRef.current;
-        for (let i = BLOCK_RANGE_START; i <= BLOCK_RANGE_END; i++) {
+        for (let i = BUFFER_05_07_START; i <= BUFFER_05_07_END; i++) {
           if (sl0[i] === null) {
-            blocked = false;
+            allFull = false;
             break;
           }
         }
-        if (blocked || phaseElapsed >= PHASE_TICKS.sta07_down_pre_block_max) {
-          nextPhase = "sta07_down_post_block";
+        if (allFull || phaseElapsed >= S2_SAFETY_CAP_TICKS) {
+          nextPhase = "s3_blocked";
         }
-      } else if (
-        currentPhase === "sta07_down_post_block" &&
-        phaseElapsed >= PHASE_TICKS.sta07_down_post_block
-      ) {
-        nextPhase = "sta07_recover_green";
-      } else if (
-        currentPhase === "sta07_recover_green" &&
-        phaseElapsed >= PHASE_TICKS.sta07_recover_green
-      ) {
-        nextPhase = "sta07_recover_linger";
-      } else if (currentPhase === "sta07_recover_linger") {
-        // Linger ends when the buffer has at least 1 empty slot AND we've shown
-        // CONSTRAINT back on STA 05 for ~2s, OR after a safety cap.
-        const movedBackTick = constraintBackTickRef.current;
-        if (movedBackTick !== null && t - movedBackTick >= 20) {
-          nextPhase = "gap";
-        } else if (phaseElapsed >= PHASE_TICKS.sta07_recover_linger_max) {
-          nextPhase = "gap";
+      } else if (currentPhase === "s3_blocked") {
+        // State 3 ends when STA 07 hits 12 builds lost.
+        if (lossesRef.current.s7 >= S3_END_TICKS) {
+          nextPhase = "s4_up";
         }
-      } else if (currentPhase === "gap" && phaseElapsed >= PHASE_TICKS.gap) {
-        nextPhase = "sta05_slow_only";
+      } else if (currentPhase === "s4_up") {
+        // State 4 lasts exactly 1 second.
+        if (phaseElapsed >= S4_DURATION_TICKS) {
+          nextPhase = "s5_constraint_back";
+        }
+      } else if (currentPhase === "s5_constraint_back") {
+        // State 5 adds 50 ticks (5 builds) at STA 05, then loops to State 1.
+        if (phaseElapsed >= S5_DURATION_TICKS) {
+          nextPhase = "s1_slow";
+        }
       }
 
       if (nextPhase) {
@@ -342,63 +321,47 @@ function FlowVisual({ className = "" }: { className?: string }) {
         phaseStartRef.current = t;
         setPhase(nextPhase);
 
-        // Hard reset at start of each cycle.
-        if (nextPhase === "sta05_slow_only") {
+        // Hard reset at start of each loop (returning to State 1).
+        if (nextPhase === "s1_slow") {
           lossesRef.current = { s5: 0, s7: 0 };
           setLosses({ s5: 0, s7: 0 });
-          constraintBackTickRef.current = null;
         }
       }
 
-      // 1b. EVENT-DRIVEN CONSTRAINT POSITIONING.
-      // The CONSTRAINT label is no longer tied to phase — it's driven entirely
-      // by buffer state between STA 05 and STA 07:
-      //   • During gap phase, no CONSTRAINT.
-      //   • Otherwise: full buffer → STA 07; any empty slot → STA 05.
+      // 1b. CONSTRAINT label positioning — strict per-state.
+      //   State 1, 2, 5 → STA 05
+      //   State 3       → STA 07
+      //   State 4       → none (STA 07 just came back UP)
       {
-        const phaseNow = phaseRef.current;
-        let desired: 5 | 7 | null = constraintAtRef.current;
-        if (phaseNow === "gap") {
-          desired = null;
-        } else {
-          // Check buffer fullness.
-          let allFull = true;
-          const sl = slotsRef.current;
-          for (let i = BUFFER_05_07_START; i <= BUFFER_05_07_END; i++) {
-            if (sl[i] === null) {
-              allFull = false;
-              break;
-            }
-          }
-          desired = allFull ? 7 : 5;
-        }
+        const ph = phaseRef.current;
+        let desired: 5 | 7 | null;
+        if (ph === "s3_blocked") desired = 7;
+        else if (ph === "s4_up") desired = null;
+        else desired = 5; // s1_slow, s2_down, s5_constraint_back
         if (desired !== constraintAtRef.current) {
-          // Track tick when CONSTRAINT moves back to STA 05 (used by linger phase
-          // to time the brief "back-on-05" window before entering gap).
-          if (
-            desired === 5 &&
-            constraintAtRef.current === 7 &&
-            phaseNow === "sta07_recover_linger"
-          ) {
-            constraintBackTickRef.current = t;
-          }
           constraintAtRef.current = desired;
           setConstraintAt(desired);
         }
       }
 
-      // 2. Accumulate losses every tick the constraint sits on a station.
-      if (constraintAtRef.current === 5) {
+      // 2. Loss accumulation — strict per-state.
+      //   State 1, 2 → s5 increments
+      //   State 3    → s7 increments
+      //   State 4    → no losses accumulate (1s pause)
+      //   State 5    → s5 increments
+      const ph = phaseRef.current;
+      if (ph === "s1_slow" || ph === "s2_down" || ph === "s5_constraint_back") {
         lossesRef.current = {
           s5: lossesRef.current.s5 + 1,
           s7: lossesRef.current.s7,
         };
-      } else if (constraintAtRef.current === 7) {
+      } else if (ph === "s3_blocked") {
         lossesRef.current = {
           s5: lossesRef.current.s5,
           s7: lossesRef.current.s7 + 1,
         };
       }
+      // s4_up: no accumulation.
 
       // 3. Move dots — back-to-front so we don't double-move.
       const sl = slotsRef.current.slice();
@@ -535,7 +498,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
             y={CHART_TITLE_Y}
             fill="rgba(255,255,255,0.92)"
             fontSize="30"
-            fontFamily="ui-monospace, monospace"
+            fontFamily="var(--font-sans)"
             textAnchor="middle"
             letterSpacing="4"
             fontWeight="700"
@@ -600,7 +563,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
                     y={baseline - s5H + 22}
                     fill="#F5C518"
                     fontSize="22"
-                    fontFamily="ui-monospace, monospace"
+                    fontFamily="var(--font-sans)"
                     textAnchor="middle"
                     letterSpacing="1"
                     fontWeight="700"
@@ -628,7 +591,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
                     y={baseline - s7H + 22}
                     fill="#E54B4B"
                     fontSize="22"
-                    fontFamily="ui-monospace, monospace"
+                    fontFamily="var(--font-sans)"
                     textAnchor="middle"
                     letterSpacing="1"
                     fontWeight="700"
@@ -643,7 +606,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   y={CHART_Y + 26}
                   fill="rgba(255,255,255,0.65)"
                   fontSize="18"
-                  fontFamily="ui-monospace, monospace"
+                  fontFamily="var(--font-sans)"
                   letterSpacing="2"
                   fontWeight="700"
                 >
@@ -742,7 +705,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
             fill = GREEN_FILL;
             cellStroke = GREEN_STROKE;
             cellFill = GREEN_FILL;
-            textInside = "RECOVER";
+            textInside = "UP";
             textColor = GREEN_STROKE;
             strokeWidth = 2;
           }
@@ -767,7 +730,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   y={Y_LINE - SLOT_CELL_H / 2 - 14}
                   fill="#E54B4B"
                   fontSize="22"
-                  fontFamily="ui-monospace, monospace"
+                  fontFamily="var(--font-sans)"
                   textAnchor="middle"
                   letterSpacing="3"
                   fontWeight="700"
@@ -775,6 +738,22 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   CONSTRAINT
                 </text>
               )}
+              {/* BLOCKED label — shows above STA 05 in states 3 and 4. */}
+              {slot.id === 5 &&
+                (phase === "s3_blocked" || phase === "s4_up") && (
+                  <text
+                    x={cx}
+                    y={Y_LINE - SLOT_CELL_H / 2 - 14}
+                    fill="rgba(255,255,255,0.55)"
+                    fontSize="22"
+                    fontFamily="var(--font-sans)"
+                    textAnchor="middle"
+                    letterSpacing="3"
+                    fontWeight="700"
+                  >
+                    BLOCKED
+                  </text>
+                )}
               {/* Machine box */}
               <rect
                 x={boxX}
@@ -793,7 +772,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
                   y={boxY + boxH / 2 + 7}
                   fill={textColor}
                   fontSize="22"
-                  fontFamily="ui-monospace, monospace"
+                  fontFamily="var(--font-sans)"
                   textAnchor="middle"
                   letterSpacing="2"
                   fontWeight="700"
@@ -808,7 +787,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
                     y={boxY + boxH / 2 - 6}
                     fill={textColor}
                     fontSize="22"
-                    fontFamily="ui-monospace, monospace"
+                    fontFamily="var(--font-sans)"
                     textAnchor="middle"
                     letterSpacing="1.5"
                     fontWeight="700"
@@ -820,7 +799,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
                     y={boxY + boxH / 2 + 22}
                     fill={textColor}
                     fontSize="22"
-                    fontFamily="ui-monospace, monospace"
+                    fontFamily="var(--font-sans)"
                     textAnchor="middle"
                     letterSpacing="1.5"
                     fontWeight="700"
@@ -835,7 +814,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
                 y={boxY + boxH + 28}
                 fill="rgba(255,255,255,0.85)"
                 fontSize="22"
-                fontFamily="ui-monospace, monospace"
+                fontFamily="var(--font-sans)"
                 textAnchor="middle"
                 letterSpacing="3"
                 fontWeight="700"
@@ -876,7 +855,7 @@ function FlowVisual({ className = "" }: { className?: string }) {
           y={VB_H - 28}
           fill="rgba(255,255,255,0.92)"
           fontSize="30"
-          fontFamily="ui-monospace, monospace"
+          fontFamily="var(--font-sans)"
           textAnchor="middle"
           letterSpacing="4"
           fontWeight="700"
@@ -891,17 +870,13 @@ function FlowVisual({ className = "" }: { className?: string }) {
 // Returns the visual state of a station given the current phase.
 // NOTE: visual state is decoupled from CONSTRAINT label location.
 function stationStateAt(stationId: number, phase: Phase): StationKind {
-  // STA 05 stays SLOW for every phase except gap.
-  if (stationId === 5 && phase !== "gap") return "slow";
-  // STA 07 progresses through DOWN -> RECOVER -> healthy.
+  // STA 05 box is yellow SLOW throughout states 1-5 (the label above the
+  // station is what changes between CONSTRAINT and BLOCKED).
+  if (stationId === 5) return "slow";
   if (stationId === 7) {
-    if (
-      phase === "sta07_down_pre_block" ||
-      phase === "sta07_down_post_block"
-    ) {
-      return "down";
-    }
-    if (phase === "sta07_recover_green") return "recover";
+    // STA 07: DOWN (red) in states 2, 3; UP/recover (green) in state 4; healthy otherwise.
+    if (phase === "s2_down" || phase === "s3_blocked") return "down";
+    if (phase === "s4_up") return "recover";
   }
   return "healthy";
 }
