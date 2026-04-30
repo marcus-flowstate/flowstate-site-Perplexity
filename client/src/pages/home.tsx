@@ -1107,7 +1107,7 @@ function Problem() {
             </p>
             <p>
               The hard question — <span className="text-white">which stations are
-              actually starving the line right now?</span> — gets buried in noise.
+              actually costing you builds right now?</span> — gets buried in noise.
               Engineers chase ghosts. Operators get blamed for variation they
               didn't cause. Continuous improvement stalls.
             </p>
@@ -1241,10 +1241,11 @@ function BuiltBy() {
             </h2>
             <div className="mt-6 space-y-5 text-[17px] leading-relaxed text-white/70">
               <p>
-                FlowState was born on a real factory floor — not a Silicon Valley
-                whiteboard. Our team ran OEE at scale inside a Tier-1 OEM,
-                chased phantom downtime through SCADA exports, and built the
-                workaround spreadsheets every CI engineer knows.
+                FlowState was shaped by years on the plant floor — not a
+                Silicon Valley whiteboard. Our team ran OEE at scale in
+                high-volume manufacturing, chased phantom downtime through
+                plant data exports, and built the workaround spreadsheets every
+                CI engineer knows.
               </p>
               <p>
                 We started FlowState because the gap between "the data exists"
@@ -1302,7 +1303,7 @@ function Story() {
   const pillars = [
     {
       title: "Our story",
-      copy: "Born on the factory floor. Built by engineers who knew the pain of chasing production issues without the right data — and decided to fix it.",
+      copy: "Plant floor first. Built by engineers who knew the pain of chasing production issues without the right data — and decided to fix it.",
     },
     {
       title: "Our vision",
@@ -1462,6 +1463,27 @@ function DemoSection() {
                     className="space-y-5"
                     data-testid="form-demo"
                   >
+                    {/* Honeypot — hidden from real users, bots fill it. Server silently rejects. */}
+                    <div
+                      aria-hidden="true"
+                      style={{
+                        position: "absolute",
+                        left: "-10000px",
+                        top: "auto",
+                        width: "1px",
+                        height: "1px",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <label htmlFor="website">Website (leave blank)</label>
+                      <input
+                        id="website"
+                        type="text"
+                        tabIndex={-1}
+                        autoComplete="off"
+                        {...form.register("website" as never)}
+                      />
+                    </div>
                     <div className="grid sm:grid-cols-2 gap-5">
                       <FormField
                         control={form.control}
