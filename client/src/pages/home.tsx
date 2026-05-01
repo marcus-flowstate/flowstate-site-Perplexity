@@ -1375,7 +1375,26 @@ function DemoSection() {
 
   const mut = useMutation({
     mutationFn: async (values: InsertDemoRequest) => {
-      const res = await apiRequest("POST", "/api/demo-requests", values);
+      // Posts to Formspree. Their endpoint expects flat form fields and JSON
+      // is fine when Accept: application/json is set. They handle CAPTCHA,
+      // honeypot (_gotcha), and email delivery to marcus@flowstateanalytics.com.
+      const payload = {
+        ...values,
+        _subject: `Demo request \u2014 ${values.firstName} ${values.lastName} @ ${values.company}`,
+        _replyto: values.email,
+      };
+      const res = await fetch("https://formspree.io/f/xkoyggzj", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error || `Submission failed (${res.status})`);
+      }
       return res.json();
     },
     onSuccess: () => {
@@ -1482,6 +1501,15 @@ function DemoSection() {
                         tabIndex={-1}
                         autoComplete="off"
                         {...form.register("website" as never)}
+                      />
+                      {/* Formspree's built-in honeypot — they auto-reject any submission with _gotcha filled */}
+                      <label htmlFor="_gotcha">Don't fill this in</label>
+                      <input
+                        id="_gotcha"
+                        type="text"
+                        name="_gotcha"
+                        tabIndex={-1}
+                        autoComplete="off"
                       />
                     </div>
                     <div className="grid sm:grid-cols-2 gap-5">
