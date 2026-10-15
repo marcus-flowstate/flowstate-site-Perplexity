@@ -1676,7 +1676,10 @@ function DemoSection() {
                     </Button>
 
                     <p className="text-xs text-white/40 text-center pt-1">
-                      We'll only use this to contact you about FlowState. No spam, ever.
+                      We'll only use this to contact you about FlowState. No spam, ever.{" "}
+                      <a href="#/privacy" className="underline underline-offset-2 hover:text-white/70" data-testid="link-form-privacy">
+                        Privacy policy
+                      </a>
                     </p>
                   </form>
                 </Form>
@@ -1724,6 +1727,11 @@ function Footer() {
                   Request a demo
                 </button>
               </li>
+              <li>
+                <a href="#/privacy" className="text-white/70 hover:text-white" data-testid="footer-link-privacy">
+                  Privacy policy
+                </a>
+              </li>
             </ul>
           </div>
 
@@ -1759,8 +1767,8 @@ function Footer() {
         </div>
 
         <div className="mt-12 pt-8 border-t border-white/5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-white/40">
-          <p>© {new Date().getFullYear()} FlowState Analytics LLC. All rights reserved.</p>
-          <p>Noblesville, Indiana · Boilermaker-built</p>
+          <p>© {new Date().getFullYear()} FlowState Analytics Inc. All rights reserved.</p>
+          <p>Fishers, Indiana · Boilermaker-built</p>
         </div>
       </div>
     </footer>
